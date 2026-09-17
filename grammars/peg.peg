@@ -1,0 +1,62 @@
+; peg.peg - the .peg surface language, written in .peg.
+;
+; This is the self-description the bootstrap proof is built on: the
+; grammar below is a grammar for the language it is itself written in.
+; It covers the subset the bootstrap parser implements -- grammar
+; blocks, rules over the arrows < and <-, ordered choice, sequence,
+; repetition, predicates, literals, character sets, the any byte, and
+; rule references.
+;
+; Deliberately absent, and why: the richer arrows (<--, and the whole
+; top-down family > -> -->) and the half-pass machinery they carry are
+; the subject of open questions Q1-Q3; :name postfixes, {n,m}
+; repetition and the zero-width anchors are later work.  None of them
+; is needed to describe this file, which is the closure property the
+; bootstrap test checks.
+;
+; One disambiguation is load-bearing and the EBNF in docs/grammar.org
+; does not state it: a body ends when the next thing is a rule header,
+; ident ws arrow.  Without that, seq is greedy and swallows the next
+; rule's name as a rule reference.  It is expressed below in the qname
+; rule, and the bootstrap applies the same rule.
+
+file    <- ws rule* ws
+
+rule    <- ident ws arrow ws body
+
+arrow   <- "<-" / "<"
+
+body    <- seq ("/" seq)*
+
+seq     <- term*
+
+term    <- prefix ("*" / "+" / "?")*
+
+prefix  <- "!" ws prefix
+         / "&" ws prefix
+         / primary
+
+primary <- "(" ws body ws ")"
+         / "[" ws charset ws "]"
+         / literal
+         / "."
+         / qname
+
+charset <- "^"? ws charsetitem*
+
+charsetitem <- "\\" .
+             / [^\]\\] "-" [^\]\\]
+             / [^\]\\]
+
+literal <- "'" ( [^'\\] / "\\" . )* "'"
+         / '"' ( [^"\\] / "\\" . )* '"'
+
+qname   <- !ruleahead ident
+
+ruleahead <- ident ws arrow
+
+ident   <- [A-Za-z_] [A-Za-z0-9_]*
+
+ws      <- ( [ \t\r\n] / comment )*
+
+comment <- ";" [^\n]*

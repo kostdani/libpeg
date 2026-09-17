@@ -1,0 +1,17 @@
+# libpeg.pc.in - pkg-config for consumers that do not use CMake.
+#
+# Configured by the root CMakeLists.txt.  The library is C11 and has no
+# dependencies beyond libc, so there is nothing in Requires: and no -l
+# beyond -lpeg.  A C++ consumer adds nothing either: peg.hpp is
+# header-only and reaches the same C symbols.
+
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: libpeg
+Description: @PROJECT_DESCRIPTION@
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lpeg
+Cflags: -I${includedir}

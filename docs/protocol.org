@@ -1,0 +1,760 @@
+#+title: The pegvm line protocol
+#+author: libpeg
+
+=pegvm= owns two buffers — a grammar and a subject — and serves atomic
+edits over stdio pipes, one line per command, s-expression replies.  This
+is the normative specification of that protocol.
+
+* Scope and status
+:PROPERTIES:
+:ID:       protocol-scope
+:END:
+
+It expands PLAN.org D10.  It is not the specification of the term
+printer's escaping (=docs/term.org= §6.2, cross-referenced below and
+deliberately not repeated) or of the grammar surface (=docs/grammar.org=).
+
+- *Requirements* are fixed by PLAN.org or forced by a constraint recorded
+  there.
+- *Decisions* are marked *this document's decision*, with the reason.
+- *=Open=* points are PLAN.org's unresolved questions (Q5, Q6, Q7, and
+  R3's scope question), marked where they bite.
+
+** What =pegvm= is for
+:PROPERTIES:
+:ID:       protocol-why
+:END:
+
+The alternative to a process is a library call, and the library call
+cannot do the thing this project is about.  Editing a grammar invalidates
+memo entries that were computed under the old grammar; the whole point of
+=pegvm= is to keep that incremental state *alive across edits*, so that a
+client — an editor, a test driver, a shell script — can make an edit and
+ask a question about the result without re-entering the parser, and
+without the parse state being rebuilt from scratch on every call.
+
+What that buys, concretely:
+
+1. *State survives between commands.*  The compiled program, the memo
+   table, the interval tree and both buffers live for the lifetime of the
+   process.  A library call would have to reconstruct them per call or
+   hand the caller a handle it must keep alive anyway — at which point it
+   is a process with extra steps.
+2. *The editor drives it without re-entering the parser.*  An edit is a
+   byte range and a replacement, and the cost of the reparse is
+   proportional to the edit (D10, §5.2).  No client code has to know
+   about memo tables or interval trees to get that.
+3. *Line-oriented text is greppable, driveable from bash, and debuggable
+   without a client library.*  That is D10's stated rationale for the
+   format, and it is why a binary framing is explicitly a later
+   possibility rather than the starting point: the text form is the
+   reference (D10).
+4. *A crash is contained.*  The parser's error model is "abort the
+   process" (S1), which is survivable when the parser is a child process
+   and fatal when it is a library call in the editor's address space.
+
+* Invocation and startup
+:PROPERTIES:
+:ID:       protocol-invocation
+:END:
+
+#+begin_example
+pegvm --grammar <prog.pegb> --subject <file> [--grammar-src <file.peg>]
+#+end_example
+
+| option | meaning |
+|--------+---------|
+| =--grammar= | a compiled program (the =.pegb= container).  Optional; omitted, the grammar buffer starts empty. |
+| =--grammar-src= | the grammar's *source text*.  Optional, and required for =edit g= (§6.2). |
+| =--subject= | the subject.  Optional; omitted, the subject buffer starts empty. |
+
+Both buffers are optional and both may be loaded later with =load=, so a
+client that wants to sit and wait for work starts =pegvm= with no
+arguments.  A file named on the command line that cannot be read is a
+startup failure: a message on stderr and a non-zero exit, because it is
+an invocation mistake and not a protocol event.
+
+*The banner.*  On startup, before reading any command, the server writes
+exactly one line:
+
+#+begin_example
+ready grammar=peg.pegb subject=doc.txt len=4096
+#+end_example
+
+- ~ready~ is the keyword.  The fields are ~key=value~ atoms, so the set
+  can grow without breaking a client that keys on names.
+- =grammar=, =subject= are the paths as given, or =-= when that buffer
+  started empty.  =len= is the subject's length in bytes.
+- *This document's decision:* fields are keyed rather than positional
+  because the banner is the one reply whose field set will grow (a
+  grammar revision, a build hash, a target profile).  An open-ended
+  positional reply cannot be extended compatibly; a keyed one can.
+- The banner is a reply, not a prompt: the server does not wait for
+  anything before writing it, and the client may send commands without
+  reading it (the first reply it reads will simply not be the banner).
+
+*Prompts.*  D10's transcripts prefix client lines with ~>~ and server
+lines with ~<~.  *Those characters are not on the wire.*  They mark
+direction in this document and in D10, nothing else; a server that
+writes a prompt, or a client that waits for one, will not interoperate.
+
+* Framing
+:PROPERTIES:
+:ID:       protocol-framing
+:END:
+
+** One command per line, one reply per line
+:PROPERTIES:
+:ID:       protocol-lines
+:END:
+
+- A command is one line terminated by =0x0A=.  A =0x0D= immediately
+  before the =0x0A= is stripped, so a Windows client that ends its lines
+  =CRLF= works unchanged.
+- Every command produces exactly one reply line, with two exceptions,
+  both stated so that a client can implement them: a blank line produces
+  no reply at all (§3.5), and =quit= produces its reply and then the
+  connection closes.
+- The server flushes after every reply.  A server that buffers its
+  replies deadlocks every client that blocks on a read, and blocking on a
+  read is the intended usage.
+- A line has no maximum length *in the protocol*.  An implementation may
+  impose one, but must then answer =err= for a line over its limit rather
+  than truncating it: a truncated =edit= would silently corrupt the
+  subject, which is the one failure this project cannot tolerate.
+
+** How the client knows a reply is complete
+:PROPERTIES:
+:ID:       protocol-completeness
+:END:
+
+*By the newline, and only by the newline.*  A client must not balance
+parentheses, count quotes, or scan for a terminator.
+
+This works because of a property of the printer: no escape it emits is a
+raw line break, so a printed term never contains =0x0A= or =0x0D=
+(=docs/term.org= §6.2, property 2).  A string that needs a newline prints
+it as =\n=.  The framing rule and the escaping rule are the same rule
+seen from two sides, and changing either breaks the other.
+
+An empty reply line is not a thing: a reply always has at least its
+keyword.
+
+** Replies are of three kinds
+:PROPERTIES:
+:ID:       protocol-reply-kinds
+:END:
+
+| kind | shape | used by |
+|------+-------+---------|
+| status line | one or more space-separated atoms, beginning with a keyword: ~ok~, ~err~, ~ready~ | every command except the two below |
+| term reply | one s-expression printed by the term printer (docs/term.org §6) | =captures=, =tree= |
+| banner | ~ready~ followed by ~key=value~ atoms | startup only |
+
+The client knows which kind to expect from the command it sent, and that
+is the whole dispatch rule — a reply is never sniffed for its shape.
+String atoms inside a status line (an =err= message, an =errors= message)
+use the printer's escapes, so a status line is also always one line; the
+escaping is not restated here (=docs/term.org= §6.2).
+
+*The echo rule.*  The first atom after ~ok~ is the command's name as it
+was written, so a client can check that a reply belongs to its request
+(=ok parse 1234 41=, =ok stats ...=).  D10's two buffer commands are the
+exception and are specified that way on purpose: they begin with the
+buffer letter, =ok s ...= and =ok g ...=, exactly as D10's transcript
+shows.
+
+** Quoting and escaping in arguments
+:PROPERTIES:
+:ID:       protocol-arguments
+:END:
+
+#+begin_example
+command ::= atom { " " arg }
+arg     ::= atom | string
+atom    ::= one or more bytes, none of them space, tab, 0x0A, 0x0D or '"'
+string  ::= '"' { escape | any byte except '"', '\' and 0x0A } '"'
+escape  ::= the escape set of docs/term.org §6.2
+#+end_example
+
+- Numbers are decimal atoms.  Byte offsets are unsigned and inclusive of
+  the start, exclusive of the end — half-open, matching the subject
+  ranges everywhere else in the system.
+- A path argument is a bare atom unless it contains whitespace or a
+  quote, in which case it is a string.
+- *An =edit= replacement text must be a string,* never a bare atom: a
+  replacement may contain anything, including nothing at all
+  (="..."=, the empty string, with two quotes and nothing between them).
+- A string's escapes are exactly the printer's, so a client that has a
+  term to send can print it and paste the result; and because the
+  printer escapes =0x0A= and =0x0D=, a replacement containing a newline
+  is written =\n= and the command still occupies one line.  This is the
+  point at which the term printer stops being a debug convenience and
+  becomes part of the wire format.
+- There is no comment syntax in a command and no way to continue one
+  across lines.  Both would add a second framing layer to a protocol
+  whose virtue is having one.
+
+** Input that is not a valid command
+:PROPERTIES:
+:ID:       protocol-invalid
+:END:
+
+| input | what happens |
+|-------+--------------|
+| a line that is empty or only whitespace | *no reply.*  It is not a command.  A client that sends one and then blocks is waiting forever, so a client must not send one; a server must not answer one, or a stray blank line would put the two sides permanently one reply out of step. |
+| an unknown first atom | =err <atom> "unknown command"= |
+| a known command with bad arguments | =err <command> "<message>"= |
+| a known command that cannot be carried out | =err <command> "<message>"= |
+
+Nothing an input line can contain is fatal.  The process exits on =quit=,
+on end of input (EOF — a clean shutdown, exit status 0), and on an
+internal abort (§7).  It does not exit because a command was wrong.
+
+* The command grammar
+:PROPERTIES:
+:ID:       protocol-commands
+:END:
+
+#+begin_example
+command ::= "load"     ("g" | "s") path
+          | "edit"     ("g" | "s") offset offset string
+          | "parse"
+          | "reparse"
+          | "captures" offset offset
+          | "tree"
+          | "errors"
+          | "stats"
+          | "status"
+          | "quit"
+#+end_example
+
+| command | arguments | reply |
+|---------+-----------+-------|
+| =load g= | a path | =ok g <len> <delta> <micros>= |
+| =load s= | a path | =ok s <len> <delta> <micros>= |
+| =edit g= | =<start> <end> <text>= | =ok g <len> <delta> <micros>= |
+| =edit s= | =<start> <end> <text>= | =ok s <len> <delta> <micros>= |
+| =parse= | — | =ok parse <match\|fail> <pos> <micros>= |
+| =reparse= | — | =ok reparse <match\|fail> <pos> <micros>= |
+| =captures= | =<start> <end>= | term reply |
+| =tree= | — | term reply |
+| =errors= | — | =ok errors <n> [<start> <end> "<message>"]...= |
+| =stats= | — | =ok stats <key>=<value> ... |
+| =status= | — | =ok status <key>=<value> ... |
+| =quit= | — | =ok quit=, then close and exit 0 |
+
+* Commands
+:PROPERTIES:
+:ID:       protocol-command-detail
+:END:
+
+** =load g <path>= and =load s <path>=
+:PROPERTIES:
+:ID:       protocol-load
+:END:
+
+Replace a buffer wholesale from a file.  The grammar is parsed and
+compiled; the subject is read as bytes.  Neither is parsed as a subject —
+=load= moves data and does no work that =parse= can be asked to do
+separately, so that a client loading four files pays for four loads and
+one parse.
+
+Reply: =ok <buffer> <len> <delta> <micros>=, where =<len>= is the new
+length in bytes, =<delta>= is =<len>= minus the old length, and
+=<micros>= is the load's own cost (for the grammar: parse plus compile;
+for the subject: nothing, so the field is 0).  Loading a buffer that was
+empty gives =<delta> == <len>=, which is the same arithmetic every other
+buffer reply uses.
+
+*Failure leaves the buffer as it was*, including on a grammar that parses
+but does not compile (§7).
+
+** =edit s <start> <end> <text>=
+:PROPERTIES:
+:ID:       protocol-edit-s
+:END:
+
+Replace the subject's byte range =[start, end)= with the bytes of =text=,
+then reparse *eagerly*.  This is the command the project exists for.
+
+Reply, exactly as D10 specifies it:
+
+#+begin_example
+ok s 41 1 87
+     ^  ^ ^
+     |  | +-- 3. microseconds spent reparsing
+     |  +---- 2. delta: the length change
+     +------- 1. the subject's new length in bytes
+#+end_example
+
+The edit is applied with the memo table's lazy shifting (D10, the paper's
+§4.2): entries whose examined extent overlaps =[start, end)= are evicted,
+everything after the edit shifts by the delta, and only what the edit
+actually disturbed is recomputed.  The reparse cost is proportional to
+the edit, not to the subject — which is the claim the =<micros>= field
+exists to make checkable from a shell script (see also =stats=).
+
+=<delta>= is =len(text) - (end - start)=, so an insertion of 1 byte has
+=<delta> == 1=, a deletion of 5 bytes has =<delta> == -5= (a bare atom
+beginning with =-=, which the argument grammar allows), and a replacement
+of two bytes by two bytes has =<delta> == 0= while still costing a
+reparse.  A client must not infer that =<delta> == 0= means nothing
+happened.
+
+** =edit g <start> <end> <text>=
+:PROPERTIES:
+:ID:       protocol-edit-g
+:END:
+
+Replace the grammar *source* buffer's range =[start, end)= with =text=,
+recompile, and invalidate memoization.  D10:
+
+#+begin_example
+ok g 108 12 3
+             ^
+             +-- 3. microseconds spent recompiling (and invalidating)
+#+end_example
+
+The three fields mean the same as for =edit s=: new buffer length, delta,
+and microseconds.  What differs is the work and the invalidation (§6.2),
+and *this document's decision* — made to match D10's own gloss, and
+because the expensive side should not be paid twice — is:
+
+- =edit g= *recompiles and invalidates but does not reparse.*  D10's
+  reply comment for the grammar edit says "recompiled, memo invalidated";
+  for the subject edit it says "reparse microseconds".  The two comments
+  name exactly the work each command does.
+- The next =parse= or =reparse= pays for the subject, and it is a *full*
+  parse, because the invalidation is total in phase 1 (§6.2).  A client
+  that wants the number should ask for it explicitly.
+
+=edit g= requires a grammar source: a process started with only
+=--grammar prog.pegb= has a bytecode buffer and no text to edit, and
+answers =err edit "no grammar source loaded"=.  The =--grammar-src=
+option exists for exactly this, and it is also what makes §7's bootstrap
+possible: the grammar is a subject like any other, so editing a grammar
+is an incremental reparse of the grammar's own text.
+
+** =parse= and =reparse=
+:PROPERTIES:
+:ID:       protocol-parse
+:END:
+
+Both run the compiled program over the current subject and produce the
+same reply:
+
+#+begin_example
+ok parse match 1234 41
+ok parse fail  87 12
+#+end_example
+
+- The second atom is the verdict: =match= or =fail=.
+- The third is a byte offset, and it means the same thing in both cases:
+  after a =match= it is the position the entry rule ended at; after a
+  =fail= it is the furthest position examined, which is what a client
+  puts a caret on.  A failed parse is a *successful command* — it is a
+  fact about the subject, not an error, and it is reported with =ok=.
+- The fourth is microseconds, wall clock, for the parse that produced the
+  answer.
+
+*The difference between them is what they may assume.*  =parse= does a
+full parse and fills the memo table as it goes; it is correct at any
+time, including after a =load s= and including after a grammar edit.
+=reparse= uses whatever the table already holds, which is what makes it
+the incremental path, and which is why =edit s= runs one internally.  A
+client that wants the incremental number after a subject edit has already
+been given it by =edit s=; =reparse= is the explicit command for the
+cases where the client made the edit itself (via =load s=) or where it
+wants to re-run the parse without an edit to measure a cache that is
+already warm.  After a grammar edit the table is empty, so =reparse=
+degenerates to =parse= — and says so by costing the same.
+
+*Both reset the tree the other commands read.*  =captures=, =tree= and
+=errors= describe the most recent successful parse; a =parse= or
+=reparse= that fails resets them to empty rather than leaving the
+previous answer in place, because a stale answer to =tree= is worse than
+no answer.
+
+** =captures <start> <end>=
+:PROPERTIES:
+:ID:       protocol-captures
+:END:
+
+The term reply D10 shows:
+
+#+begin_example
+captures 40 60
+(expr (term (num "42")))
+#+end_example
+
+It returns the structured nodes of the most recent parse whose spans
+overlap =[start, end)=, printed by the term printer (=docs/term.org=
+§6).  The nodes returned are the *outermost* ones in the range — a node
+whose parent also overlaps the range is not returned separately, because
+it is the parent's child and printing both would print it twice.  If
+nothing overlaps, the reply is =()=, which is the printer's empty list
+and not an error.
+
+*Implementation requirement.*  This is the one command that must be
+answered from the tree, not from a fresh parse, and it must not
+re-derive the region: it uses the same capture-window mechanism the
+end-to-end API exposes (=peg_capture_interval= in the current
+implementation's terms), and the range is the window.  A =captures= that
+reparses defeats the purpose of the command.
+
+*Borrowed views.*  The nodes in the reply belong to the memo table and
+are bounded by the entry's lifetime; the server prints them and forgets
+them, and a client must not assume a node's identity survives the next
+edit.  This is =docs/term.org= §4.2's borrowing rule, and =captures= is
+where a client is most likely to trip over it.
+
+** =tree=
+:PROPERTIES:
+:ID:       protocol-tree
+:END:
+
+The whole result tree of the most recent parse, as one term reply.  D10
+writes the reply as =(program ...)=; in this specification it is the
+entry rule's value printed at top level, so a JSON grammar's tree starts
+=(value ...)= — the head names the rule that produced it, not a wrapper
+the implementation invented.
+
+=tree= is unbounded: its size is proportional to the subject, and the
+printer's allocation for a large subject may dwarf the subject itself.
+A client that wants a bounded answer uses =captures= with a range.  This
+is the one place where D10's "binary framing can follow later" is
+already overdue, and it is recorded as such rather than fixed here: the
+text form is the reference, and a client that asks for the whole tree of
+a megabyte file has asked for a megabyte of text.
+
+** =errors=
+:PROPERTIES:
+:ID:       protocol-errors
+:END:
+
+The parse errors recorded by the most recent parse, as a status line:
+
+#+begin_example
+ok errors 2 12 13 "unexpected character" 40 41 "expected ')'"
+#+end_example
+
+- The first number is the count.  It is present so that a client can
+  validate the rest without trusting the server's tokenizer.
+- What follows is that many triples: start offset, end offset, message.
+- The message is a string, escaped as in =docs/term.org= §6.2, so it
+  occupies one line like everything else.
+- No errors is =ok errors 0=.
+- *This is an =ok=, not an =err=,* even when there are errors: a subject
+  with parse errors is a well-formed subject, and the errors are the
+  answer to the question.  =err= is reserved for "I did not do what you
+  asked" (§7).
+
+** =stats=
+:PROPERTIES:
+:ID:       protocol-stats
+:END:
+
+=ok stats= followed by ~key=value~ atoms.  PLAN.org §5.4 asks for this
+from day one, and for the stated reason: the whole value proposition is a
+performance claim, and a server that cannot report its own memo hit rate
+will not be tuned effectively.
+
+#+begin_example
+ok stats memo=1024 hits=9981 misses=112 tree=331 nodes=12004 ivnodes=1024 \
+         heap=1310720 last_us=87
+#+end_example
+
+Required keys, with what each is for:
+
+| key | meaning |
+|-----+---------|
+| =memo= | live memo entries |
+| =hits= | memo lookups that found an entry since startup |
+| =misses= | memo lookups that did not |
+| =tree= | live tree-memoization entries (the merged entries of the paper's §4.3) |
+| =nodes= | live term nodes |
+| =ivnodes= | live interval-tree nodes — the structure's own footprint, which the paper's analysis bounds |
+| =heap= | bytes live in the term and memo arenas |
+| =last_us= | microseconds of the most recent parse-producing command |
+
+A client must ignore keys it does not know, and a server may add keys:
+that is why this reply is keyed and not positional.  The hit rate is
+=hits / (hits + misses)= and is deliberately not reported — a derived
+number in a wire format is a second source of truth.
+
+** =status=
+:PROPERTIES:
+:ID:       protocol-status
+:END:
+
+=ok status= followed by ~key=value~ atoms: the buffer lengths, the
+grammar revision, and the dirty state.
+
+#+begin_example
+ok status glen=108 slen=4096 grev=3 dirty=0 parsed=1
+#+end_example
+
+| key | meaning |
+|-----+---------|
+| =glen= | grammar source length in bytes (0 if none is loaded) |
+| =slen= | subject length in bytes |
+| =grev= | grammar revision: 0 at startup, incremented by every accepted =edit g= and =load g= |
+| =dirty= | 1 if the subject has been edited since the last parse, 0 otherwise |
+| =parsed= | 1 if the most recent parse succeeded, 0 otherwise |
+
+=grev= is the field a client caches against: a reply to =captures= is
+only meaningful for the revision that produced it, and a client holding
+a tree across commands compares revisions instead of guessing.  It is
+also the hook PLAN.org Q7 will need — how the grammar's own incremental
+reparse is keyed is *open*, and =grev= is a monotone counter, not that
+key.
+
+** =quit=
+:PROPERTIES:
+:ID:       protocol-quit
+:END:
+
+=ok quit=, then close both pipes and exit 0.  End of input does the same
+without the reply.  There is no =quit= argument and no confirmation; a
+client that wants the buffers flushed takes them with =tree= or =status=
+first, because nothing is persisted.
+
+* The two buffers
+:PROPERTIES:
+:ID:       protocol-buffers
+:END:
+
+The two-buffer split is the interesting part of =pegvm= (D10): the
+grammar is itself a buffer that can be edited incrementally, which means
+the grammar must be incrementally parseable, which is what the bootstrap
+produces.
+
+#+begin_example
+  grammar buffer                subject buffer
+  (text + bytecode)             (bytes)
+       |                              |
+       | edit g / load g              | edit s / load s
+       v                              v
+  recompile + invalidate        edit + reparse
+  memo (D10, the hard part)     (lazy shift, paper §4.2)
+       |                              |
+       +--------------+---------------+
+                      v
+            term tree / captures  ->  s-expr printer  ->  stdout
+#+end_example
+
+** What a subject edit invalidates
+:PROPERTIES:
+:ID:       protocol-subject-edit
+:END:
+
+*Positions shift, and the memo table shifts with them.*
+
+- Every memo entry whose examined extent overlaps the replaced range
+  =[start, end)= is evicted: it may have examined a byte that changed, and
+  a PEG's examined extent can exceed what it matched, so overlap and not
+  containment is the test (the interval tree's half-open semantics,
+  memo.h).
+- Every entry after the edit moves by =<delta>=.  The shift is *lazy*: a
+  single shift record is appended and applied on demand, so an edit costs
+  O(entries evicted + log n) rather than O(entries).  This is the paper's
+  §4.2 and it is what the existing implementation already does; there is
+  no design freedom here.
+- Term nodes inside surviving entries move for free, because their spans
+  are stored relative to the entry (§3.2 of =docs/term.org=).
+- The grammar, the compiled program and =grev= are untouched.
+
+Reply fields: =<len>= is the subject's new length, =<delta>= is the
+length change, =<micros>= is the reparse.  Nothing in the reply reports
+how many entries were evicted — that is =stats=' business, and the
+interesting number to watch after a small edit (R11).
+
+** What a grammar edit invalidates
+:PROPERTIES:
+:ID:       protocol-grammar-edit
+:END:
+
+*The program is regenerated, and every memo entry is meaningless.*
+
+A memo entry is keyed by (rule id, position) into the *compiled program*.
+A grammar edit can renumber rules, add them, remove them, or change what
+an unchanged id matches — so after a grammar edit there is no entry whose
+meaning can be trusted, and phase 1 drops them all.
+
+*Phase 1 is the required behaviour, and it is stated here rather than
+left to the implementer.*  R3's mitigation is explicit: "phase 1 of
+=pegvm= may do a full recompile on grammar edits and only the subject
+edit is incremental.  Ship that, then improve."  So:
+
+1. =edit g= recompiles the whole grammar and clears the memo table.  This
+   is a full recompile; the grammar's own incremental reparse (Q7) is the
+   later refinement.
+2. The subject buffer is untouched: an edit to the grammar moves no
+   subject positions, and =<len>= and =<delta>= in the reply are the
+   *grammar* buffer's, per D10's "buffer, new length, delta" gloss.
+3. Nothing is reparsed.  The next =parse= pays a cold-memo full parse, and
+   the client sees it in that reply's =<micros>=.
+4. A later incremental implementation must not change any of this on the
+   wire: the reply keeps its shape, and the only observable difference is
+   that the recompile and the following parse get cheaper.  An
+   incremental grammar edit whose *result* differs from the full
+   recompile is a bug by definition — the differential discipline of
+   test_peg.c applies to grammars exactly as it applies to subjects.
+
+** Which reply field reports what
+:PROPERTIES:
+:ID:       protocol-fields
+:END:
+
+| field | =edit s= / =load s= | =edit g= / =load g= |
+|-------+---------------------+---------------------|
+| 1st atom | buffer letter =s= | buffer letter =g= |
+| =<len>= | subject length after | grammar source length after |
+| =<delta>= | subject length change | grammar source length change |
+| =<micros>= | the incremental reparse | the parse + compile (+ invalidation) |
+
+D10's two transcripts fix the field order and meaning — =ok s 41 1 87= is
+"buffer, new length, delta, reparse microseconds", =ok g 108 12 3= is
+"recompiled, memo invalidated" — and the table above is that reading
+made explicit.  The numeric values in D10 are illustrative; the positions
+are not.
+
+* Errors and atomicity
+:PROPERTIES:
+:ID:       protocol-errors-atomicity
+:END:
+
+** The error reply
+:PROPERTIES:
+:ID:       protocol-error-reply
+:END:
+
+#+begin_example
+err edit "range 40..20 is not a valid half-open range"
+err frobnicate "unknown command"
+#+end_example
+
+- The first atom is ~err~; the second is the command name as written, or
+  the unknown first atom, or ~?~ when the line did not tokenize at all
+  (an unterminated string, a stray byte).
+- The third is a message string, escaped per =docs/term.org= §6.2.  It
+  should name the offending argument — a client that has to guess which
+  of four arguments was rejected will ask again.
+- There is no numeric error code.  *This document's decision:* a code is
+  a second vocabulary to keep in sync across two languages and two
+  implementations, and D10's rationale for the text protocol was that it
+  is readable without a client library.  A message is what a human
+  reading a bash transcript needs; a machine matches on the command name
+  and the message text, and if that becomes painful a code can be added
+  as an atom before the message without breaking the line's shape.
+
+** Atomicity
+:PROPERTIES:
+:ID:       protocol-atomicity
+:END:
+
+*D10's word is "atomic", and this document takes it literally: a command
+either takes effect completely or not at all.*
+
+That means, for every command, including the ones that fail midway:
+
+1. *The process stays usable.*  After an =err=, the buffers are what they
+   were before the command, the memo table is what it was, the compiled
+   program is what it was, and the connection is open.  A client may
+   retry, send a different command, or ignore the error and continue.
+2. *=edit= snapshots before it splices.*  A failed reparse (or a failed
+   recompile, for =edit g=) must be rolled back, and the rollback is
+   exact: the replaced bytes are known to the server — it has the buffer
+   — so it re-applies them as the inverse edit before answering =err=,
+   and rebuilds the invalidation state that the failed edit destroyed.
+   An implementation that applies the edit and then discovers the
+   failure has already lost, so the snapshot is taken first.
+3. *=edit g= is one transaction across the two things it changes.*  A
+   grammar edit that parses but does not compile (an unresolved rule
+   reference, a nullable alternative inside a repetition, the
+   L-attribution check of =docs/grammar.org= §4.2) leaves both the
+   grammar buffer and the compiled program untouched, and answers =err=.
+   The half-state — new text, old program — is the one outcome that must
+   not exist, because it makes every subsequent =parse= a lie.
+4. *=load= is the same rule with one file.*  A file that cannot be read,
+   or a grammar that does not compile, leaves the buffer as it was.
+5. *A crash is the exception, and it is the reason for the process.*
+   The parser's error model is "abort the process" (S1), so an internal
+   abort kills =pegvm= with the pipes closing.  A client sees EOF, which
+   is distinguishable from ~ok quit~ only by the missing reply — and that
+   is enough.  Nothing on disk is corrupted, because nothing is
+   persisted.
+
+* A worked session
+:PROPERTIES:
+:ID:       protocol-session
+:END:
+
+D10's transcript, extended with the commands above and with the reply
+kinds made explicit.  Lines beginning ~>~ are sent by the client, lines
+beginning ~<~ by the server; neither character is on the wire (§2).
+
+#+begin_example
+$ pegvm --grammar peg.pegb --subject doc.txt --grammar-src peg.peg
+< ready grammar=peg.pegb subject=doc.txt len=4096
+> status
+< ok status glen=812 slen=4096 grev=0 dirty=0 parsed=0
+> parse
+< ok parse match 4096 3271
+> captures 40 60
+< (expr (term (num "42")))
+> edit s 42 42 "x"            ; edit the SUBJECT
+< ok s 41 1 87                ; buffer, new length, delta, reparse microseconds
+> captures 40 60
+< (expr (term (num "42x")))   ; the window was re-derived from the shifted entry
+> edit g 100 104 "expr"       ; edit the GRAMMAR
+< ok g 108 12 3               ; recompiled, memo invalidated
+> status
+< ok status glen=108 slen=41 grev=1 dirty=0 parsed=1
+> parse                      ; cold memo: this is a full parse
+< ok parse match 41 512
+> stats
+< ok stats memo=1024 hits=4 misses=1019 tree=9 nodes=311 heap=65536 last_us=512
+> tree
+< (start (sum ...))
+> errors
+< ok errors 0
+> quit
+< ok quit
+#+end_example
+
+Two things in that transcript are the protocol doing its job.  After the
+grammar edit, =grev= changed and the memo count returned to its
+cold-start level: the client can *see* the invalidation rather than
+infer it.  And after the subject edit, the =captures= window answered
+from the shifted entries, not from a fresh parse — the 87 microseconds
+of =edit s= is the whole cost.
+
+* Open questions
+:PROPERTIES:
+:ID:       protocol-open
+:END:
+
+- *Q7 — how the grammar's own incremental reparse is keyed.*  =pegvm=
+  edits the grammar buffer, the grammar is parsed by the grammar's own
+  bootstrap, and a grammar change can require recompiling the bytecode
+  and invalidating the subject's memo table.  The dependency structure
+  between the two memo tables — the grammar's and the subject's — is not
+  designed.  Phase 1 (§6.2) does not need it: it recompiles wholesale.
+  =grev= is a placeholder for the key, not the key.
+- *Q5 and Q6 — what =:name= controls and what the memoization default is
+  per arrow.*  Both change which entries exist, so both change what a
+  =captures= reply can contain and what the =memo= key in =stats= means.
+  Neither changes the wire format.
+- *How large can a reply get before the text form has to go?*  D10
+  permits a binary framing later and calls the text form the reference.
+  =tree= is where the question becomes acute (§5.6); the answer is a
+  measurement, not a design decision, and it should be taken on a large
+  subject before anyone builds the binary form.
+- *Should =captures= take a rule-name filter?*  D10's form takes a range
+  and returns whatever overlaps it.  A client that wants "all =num=
+  nodes" has to filter the reply itself, which is trivial in a shell and
+  wasteful over a pipe on a large subject.  Recorded as a candidate
+  extension, deliberately not added: the reply shape above is what D10
+  shows, and extensions belong after a client needs one.

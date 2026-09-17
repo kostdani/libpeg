@@ -1,0 +1,27 @@
+libpeg NEWS
+
+Version 0.1.0 (not yet released)
+
+  The first release: the C11 core of an incremental PEG parser, plus the
+  header-only C++ wrapper over the same ABI.
+
+  * The interval tree with lazy shifting (paper Sections 4.1-4.2).  The
+    naive array implementation is kept as a test-only differential
+    baseline, not compiled into the library.
+  * The memoization table: refcounted captures, overlap eviction, and
+    edit application.
+  * The LPeg-style parsing machine, including tree memoization (Section
+    4.3) and the window optimization (Section 4.4).
+  * The pattern AST and the grammar compiler, with the Get and head-fail
+    optimization passes.
+  * The term type: tagged doubly-linked lists with optional sub-lists,
+    with an iterative free, an iterative printer, and a text wire format.
+  * The end-to-end incremental API (peg/peg.h): parse, edit, reparse.
+    The differential test holds it to the paper's claim -- after any
+    edit, an incremental reparse equals a full reparse of the edited
+    text.
+  * peg/peg.hpp, the C++17 wrapper: move-only RAII handles over the C
+    ABI, no exceptions, no separate library to link.
+
+  Not ported: the Go original's `re` package, the .peg text-grammar
+  front-end.  Grammars are built programmatically (peg_pattern.h).

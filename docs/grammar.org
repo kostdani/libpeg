@@ -1,0 +1,727 @@
+#+title: The .peg surface syntax
+#+author: libpeg
+
+The concrete syntax of the libpeg language: the grammar block, the six
+arrows and the half-passes they select, the =:name= postfix, and the
+expression forms.  This is the document a lexer and a reader are written
+from.
+
+* Scope and status
+:PROPERTIES:
+:ID:       grammar-scope
+:END:
+
+It expands PLAN.org D2 (dash count is value richness), D3 (arrow
+direction is the half-pass), D4 (a rule is a function from inherited to
+synthesized), D5 (braces delimit grammars; ={{ }}= is gone) and D6
+(=:name=).  It is *not* the specification of the value representation
+(=docs/term.org=) or of the =pegvm= protocol (=docs/protocol.org=).
+
+*Every arrow token in this document is spelled as PLAN.org spells it* —
+~<~, ~<-~, ~<--~ and ~>~, ~->~, ~-->~.  A reader who has seen ~<=~ and
+~=>~ written elsewhere has seen markup noise: the tokens are ~<~ and ~>~
+with one or two dashes, and the number of dashes is the whole point (D2).
+
+** How to read the requirements in this document
+:PROPERTIES:
+:ID:       grammar-reading
+:END:
+
+- *Requirements* are fixed by PLAN.org.  An implementation that does
+  otherwise is wrong.
+- *Decisions* are points PLAN.org leaves unnamed but that must be pinned
+  before a lexer can be written.  They are marked *this document's
+  decision*, with the reason.
+- *Open* points are PLAN.org's own unresolved questions (Q1, Q2, Q3, Q5,
+  Q6), marked where they bite.  Nothing here resolves them; each is
+  stated with the two readings and the consequence of each, so that the
+  answer changes a production rather than the shape of the language.
+- *Implementer's discretion* is marked as in =docs/term.org=: a free
+  choice that must be documented in the reader's header.
+
+* Lexical structure
+:PROPERTIES:
+:ID:       grammar-lexical
+:END:
+
+** Bytes, not characters
+:PROPERTIES:
+:ID:       grammar-bytes
+:END:
+
+A =.peg= file is a byte string.  A literal is a byte string, a set is a
+set of bytes, and the subject being matched is bytes.  No layer knows
+about encodings, so UTF-8 in a literal is passed through as its bytes and
+matches byte for byte.
+
+** Whitespace and comments
+:PROPERTIES:
+:ID:       grammar-ws
+:END:
+
+- Whitespace is =0x20=, =0x09=, =0x0D= and =0x0A=, and is insignificant
+  between tokens.
+- A comment is =;= through the end of the line.  There is exactly one
+  comment form, it is terminated by =0x0A= or by end of file, and it is
+  whitespace for every purpose below.  (This is the form the examples in
+  PLAN.org use.)
+
+** Identifiers and qualified names
+:PROPERTIES:
+:ID:       grammar-ident
+:END:
+
+#+begin_example
+letter   ::= "A".."Z" | "a".."z" | "_"
+digit    ::= "0".."9"
+ident    ::= letter { letter | digit }
+qname    ::= ident { "." ident }
+#+end_example
+
+Identifiers are ASCII and case-sensitive: =Env=, =env= and =ENV= are
+three names.  There is no keyword set — =grammar=, and the words used as
+example rule names (=start=, =num=), are ordinary identifiers, and a
+grammar may define a rule called =grammar= if it enjoys confusion.
+
+*Qualified names.*  The lexical grammar reserves =qname= (dotted) because
+PLAN.org Q1's answer decides whether the reader needs it: if nested
+grammars are lexically scoped, =sub.num= is how a rule outside =sub={}
+refers to a rule inside it; if they are flat-scoped, every definition
+lives in one namespace and a dot is never written.  *A reader must lex
+=known= either way*, so that Q1 can be answered without a lexical change.
+Whether a dot is *meaningful* is Q1, and is open — see §3.1.
+
+** Literals and escapes
+:PROPERTIES:
+:ID:       grammar-literals
+:END:
+
+A literal is written =="..."= or ='...'=; the two delimiters differ only
+in which quote needs escaping, and they denote the same byte string.
+
+The escape set is exactly the one =docs/term.org= §6.2 specifies for the
+term printer — =\"= (or =\'= inside a single-quoted literal), =\\=, =\n=,
+=\r=, =\t=, and =\xHH= with exactly two hex digits in either case — plus
+one addition: the *other* quote is escapable but never needs to be
+(='a"b'= needs no escape, ='a\'b'= is the same string written another
+way).  Any other backslash sequence is a lexical error, and a lexical
+error is reported with its byte offset in the grammar source, not
+silently ignored: an unrecognized escape in a literal is a grammar bug
+that would otherwise match the wrong bytes forever.
+
+*Requirement.*  A literal denotes bytes, so a literal of length zero
+(==""=) is the empty match.  It is legal and it is the identity element
+of a sequence; it is *not* a way to spell "matches nothing" (that has no
+spelling, and needs none).
+
+** The lexical grammar
+:PROPERTIES:
+:ID:       grammar-lexical-grammar
+:END:
+
+#+begin_example
+file     ::= { ws | comment } { item } { ws | comment }
+comment  ::= ";" { any byte but 0x0A }
+arrown   ::= ">" | "->" | "-->"                 ; top-down,   dash = richness
+arrowv   ::= "<" | "<-" | "<--"                 ; bottom-up,  dash = richness
+anchor   ::= "^" | "$" | "\A" | "\z" | "\b" | "\B"
+integer  ::= digit { digit }
+#+end_example
+
+Arrows are lexed by maximal munch, which is unambiguous because no other
+construct in the expression language begins with ~<~ or ~>~: ~-~ is not a
+token at all outside a set, so ~-->~ is never read as ~->~ followed by
+~>~, and ~<--~ is never read as ~<-~ followed by ~-~.  Maximal munch
+applies where the grammar expects an arrow, and an arrow is expected in
+exactly one place (§4.1).
+
+* The grammar block
+:PROPERTIES:
+:ID:       grammar-block
+:END:
+
+D5: ={ ... }= introduces a grammar or a nested subgrammar, and ={{ }}= is
+gone — captures are carried by the arrows, so there is no second capture
+form to learn.
+
+#+begin_example
+grammar ::= [ "grammar" ] [ ident ] "{" { item } "}"
+item    ::= rule | subgrammar
+#+end_example
+
+- The keyword =grammar= is optional and purely documentary.  =grammar
+  Arith { ... }=, =grammar { ... }= and =Arith { ... }= are the same
+  construct; PLAN.org writes all three forms across its examples.
+- The name is optional too, and an unnamed block is legal at any
+  position.  An unnamed *nested* block is legal but unreferenceable as a
+  whole, so it is only useful as a grouping, and a reader may warn.
+- *The first rule of a block is its entry rule.*  There is no reserved
+  name for it and no =start= keyword: §5.3 of PLAN.org writes =start <--
+  expr= and D5 writes =expr <-- ...=, and in both the entry rule is the
+  first one.  *This document's decision*, made because the alternative (a
+  reserved =start= identifier, or a directive) would be a fourth way to
+  say something the position already says.  A grammar that wants its
+  entry rule to have a name of its own gives it one, as §5.3 does.
+
+** Nesting and scoping — Q1 is open
+:PROPERTIES:
+:ID:       grammar-scoping
+:END:
+
+#+begin_example
+grammar {
+  expr <-- term ('+' term)*
+  term <-  sub.num / ....
+
+  sub {                        ; a nested subgrammar
+    num <-- digit+
+  }
+}
+#+end_example
+
+*The question (PLAN.org Q1).*  =sub { num <-- digit+ }= declares =num=.
+Can the enclosing grammar reference =num= directly, or is it =sub.num=?
+
+| reading | what it implies |
+|---------+-----------------|
+| *lexical scoping* | A nested grammar's rules are visible only inside it; the enclosing grammar refers to them qualified, =sub.num=, or not at all.  Familiar from every block-structured language. |
+| *flat scoping* | Every definition in a file lives in one namespace and nested grammars compile inline, which is what the current implementation's grammar model does.  The enclosing grammar references =num= directly, the dotted form means nothing, and two nested grammars may not both define =num=. |
+
+*What is assumed here.*  The worked examples in this document are written
+under lexical scoping, because PLAN.org §5.3's own note reads "=num= is
+declared in a nested =sub { }= grammar and is therefore name-scoped to
+it", which is the lexical reading.  *This is an assumption, not a
+resolution*, and it is the one place where a wrong guess changes the
+meaning of existing text rather than only its validity.
+
+*What the answer changes.*  Visibility only — not the syntax, not the
+lexing (both readings need =qname=, §2.3), and not the compiled program,
+since nested grammars compile inline in both readings (the nanopass
+document's =grammar= form).  It does change which of two grammars is
+accepted, and it decides whether a nested grammar's rule names must be
+unique in the file.
+
+* Rules
+:PROPERTIES:
+:ID:       grammar-rules
+:END:
+
+#+begin_example
+rule     ::= ident [ in-part ] out-part body [ half-body ]
+in-part  ::= arrown sexpr
+out-part ::= arrowv
+body     ::= choice
+#+end_example
+
+The parts in order: the rule's name, its inherited half, its synthesized
+half, its body, and (Q3, §4.4) the bodies of its halves.
+
+- *The out-part is mandatory.*  A rule must say how rich its synthesized
+  value is, including when the answer is "none" — a rule that produces
+  nothing writes =<=.  PLAN.org §5.3's EBNF has =[in-part] out-part=
+  with the out-part outside the brackets, and this document keeps that:
+  an inherited half without a synthesized half is a rule that pushes
+  attributes down and reports nothing, which is spelled =r --> Env <
+  body=.
+- *The in-part's operand is an s-expression* in the half-pass language,
+  not an expression of §5: =--> Env= names an inherited value, and =Env=
+  is not a rule reference here.  That language is provisional — PLAN.org
+  Q3 decides where half-pass bodies and their operands live and whether
+  they exist at all — so a reader must treat the operand as opaque and
+  hand it to the half-pass machinery unparsed (§4.4).
+
+** The six arrows
+:PROPERTIES:
+:ID:       grammar-arrows
+:END:
+
+Dash count is value richness; direction is the half-pass (D2, D3).
+
+| arrow | direction | the value it carries | produced from |
+|-------+-----------+----------------------+----------------|
+| =<=   | bottom-up | nothing | the memo entry only: ={rule, pos, len}= |
+| =<-=  | bottom-up | the matched text | a flat list of text nodes |
+| =<--= | bottom-up | a structured term | a node tagged with the rule's name |
+| =>=   | top-down  | nothing | nothing is pushed down |
+| =->=  | top-down  | a string | the inherited value is text |
+| =-->= | top-down  | a term | the inherited value is a term |
+
+*The bottom-up half is the synthesized value* (D2, and =docs/term.org=
+§2.3 for the exact node shapes).  This is the half that replaces ={{ }}=.
+
+*The top-down half is the inherited value* (D3).  Two of the three
+right-pointing forms exist on the assumption recorded as PLAN.org Q2: the
+natural reading of "length also corresponds to output type of half nano
+pass" is that the right-arrow dash count is the same three richnesses for
+*inherited* values, but it could instead mean the dash count names the
+*output* of the top-down half — which for an inherited attribute is what
+it passes down, so the two readings coincide.  *Q2 is open.*  What is
+fixed regardless of the answer is the direction/dash rule: more dashes,
+richer value.  What Q2 decides is whether =>= means "pushes nothing" or
+"pushes something whose type is not spelled here", and therefore whether
+the compiler can reject ~->~ on a rule whose parent pushes a term.
+
+*Mixing the directions.*  A rule may carry both halves (D4) and that is
+the normal case: =expr --> Prec <-- term ...= receives a precedence level
+and produces a term.  The direction of each arrow is independent of the
+other's and of the body's shape.
+
+** A rule is a function from inherited to synthesized
+:PROPERTIES:
+:ID:       grammar-rule-semantics
+:END:
+
+D4's reading, and the reason the two halves are one nanopass rather than
+two passes:
+
+#+begin_example
+stmt --> Env  <-- Stmt      ; receives Env, produces Stmt
+expr --> Prec <-- Expr      ; receives a precedence level
+term <-- num / '(' expr ')' ; receives nothing, produces a term
+ws   <  [ \t\r\n]*          ; produces nothing: the fast path
+#+end_example
+
+The top-down half runs before the children are recognized, the bottom-up
+half after.  In attribute-grammar terms the pair is *L-attributed* when
+the top-down half reads only what is available to it: values handed down
+from ancestors, and values already synthesized by *left* siblings.
+
+*The restriction is a checkable invariant.*  For a rule =R= with an
+in-part, every name the in-part's expression mentions must be one of:
+
+1. a parameter of =R='s own in-part (the names it declares — =Env=,
+   =Prec=) or a name inherited by =R= from its own ancestors; or
+2. a =:name= binding attached to a sub-expression of =R='s enclosing rule
+   that occurs *textually before* the reference to =R= — since the
+   enclosing rule's half runs left to right, a left sibling's value
+   exists by the time =R= is entered; or
+3. a name introduced by the enclosing rule's own in-part.
+
+Anything else — a right sibling, a descendant that has not been parsed
+yet, the rule's own synthesized value — is a violation.
+
+*Why violating it silently changes the parse instead of failing.*  At
+the moment the top-down half runs, the value of a right sibling does not
+exist.  A naive implementation reads whatever is in the slot: a value
+from the previous iteration of an enclosing repetition, from an earlier
+alternative that backtracked, or from the previous parse.  *It is a
+well-typed read of a stale value*, so the parse succeeds and produces a
+different tree — and on a reparse after an edit, the stale value can
+differ from the one a full parse would have produced, which breaks the
+project's central differential test.  R7's mitigation is exactly this:
+a static check for top-down halves that read right siblings, plus
+property tests against a naive evaluator.  The check is a *requirement*,
+not a diagnostic: it belongs in the reader, where the textual order the
+rule refers to is still visible.
+
+** The =:name= postfix
+:PROPERTIES:
+:ID:       grammar-name-postfix
+:END:
+
+D6: a postfix =:name= binds a name to a sub-expression's value, and the
+enclosing rule's bottom-up half — and, when the binding occurs to its
+left, its top-down half (§4.2) — can then reference it.
+
+#+begin_example
+expr <-- term ('+' term)* :terms
+;                              ^^^^^^ names the ('+' term)* value
+factor <-- num :n / '(' expr ')' :e
+;             ^^ names the num value      ^^ names the expr value
+#+end_example
+
+*What it binds.*  The value of the largest complete expression to its
+left at the same nesting level — in the productions below, the postfix
+expression it follows.  It does not change that expression's arrows or
+its node shape; it gives its value a name.
+
+*What it is available to.*  The enclosing rule only, and only in the
+halves the L-attribution permits (§4.2): the bottom-up half always, the
+top-down half of a following sub-expression when the binding is to the
+left of it.  A =:name= is not visible to the enclosing rule's parent and
+is not a rule name: the enclosing rule's node is identified by the rule's
+own name, and a parent that wants the child's value refers to the child
+rule, not to a label chosen inside the child.
+
+*Relationship to what it replaced.*  This is the replacement for
+compiler-assigned capture ids: the grammar author names what they want to
+use instead of the compiler guessing.  It also replaces ={{ }}= (D5), so
+there is no separate capture syntax anywhere in the language.
+
+*Q5 is open.*  Whether =:name= also controls *whether* a memo entry is
+written — i.e. acts as the opt-in memoization flag — or only names an
+already-computed value:
+
+| reading | what the compiler does | what changes |
+|---------+------------------------+--------------|
+| *naming only* | Every rule is memoized (the packrat default) with the payload its arrow selects; =:name= is a binding form and nothing else. | D6 as written.  Memo-table size is not under the author's control. |
+| *memoization flag* | Only named sub-expressions get memo entries. | Valuable on a 64 KB device (D8): the author trades re-derivation for table size.  It also changes what a =captures= reply can contain and makes the fast path (§4.1) opt-in rather than automatic. |
+| *both* | A named expression is memoized; an unnamed one is not, but a rule's own value is always memoized. | The readings are not mutually exclusive — PLAN.org Q5 says so explicitly — and this is the middle ground. |
+
+*This document does not resolve Q5*, and the two readings differ in what
+the compiler has to do, not only in what the grammar means.  Until it is
+answered, a reader must accept =:name= and record it; nothing else about
+the surface depends on the answer.  See also Q6 (the memoization default
+per arrow, and the missing syntax for tree memoization, which has no
+spelling at all in this language).
+
+** Half-pass bodies — Q3 is open
+:PROPERTIES:
+:ID:       grammar-half-bodies
+:END:
+
+PLAN.org §5.3 proposes a per-rule block, and the EBNF above carries it:
+
+#+begin_example
+rule     ::= ident [ in-part ] out-part body [ half-body ]
+half-body ::= "{" sexpr* "}"
+#+end_example
+
+#+begin_example
+expr --> Prec <-- term (('+' / '-') term)* :ops {
+  down { push Prec }
+  up   { fold-left ops }
+}
+#+end_example
+
+*Q3 is the biggest open question in the front end* and it decides whether
+libpeg's grammar language is a parser language or a transformation
+language.  The three candidate answers:
+
+1. A per-rule body, as above.
+2. One body per nanopass, containing all rules' actions.
+3. No user-written bodies at all: the halves are compiler-internal
+   traversals and the semantics comes only from the arrows.
+
+The reason all three are still live is that the arrows alone carry the
+*value plumbing* (D2/D3/D4) — the bodies only decide what happens to a
+value once it arrives.  A reader written before Q3 is answered must:
+lex the block, capture its contents verbatim, and hand them to the
+half-pass stage untouched.  A reader that rejects the block would
+foreclose answers 1 and 2; a reader that interprets it would commit to
+answer 1.  Neither is acceptable while Q3 is open.
+
+* Expressions
+:PROPERTIES:
+:ID:       grammar-expressions
+:END:
+
+#+begin_example
+choice   ::= seq { "/" seq }
+seq      ::= { term }
+term     ::= postfix [ ":" ident ]
+postfix  ::= primary { "*" | "+" | "?" | "{" integer [ "," integer ] "}" }
+primary  ::= "(" choice ")"
+           | "[" [ "^" ] { set-item } "]"
+           | literal | "." | anchor | qname
+#+end_example
+
+A sequence of zero terms is the empty match, which is what a body such as
+=x < <= would otherwise need a spelling for.
+
+** Ordered choice and sequence
+:PROPERTIES:
+:ID:       grammar-choice
+:END:
+
+- =e1 / e2= is ordered choice: try =e1=; if it fails, try =e2= at the
+  same position.  Right-associative, so =a / b / c= is =a / (b / c)=,
+  and the preference order is left to right.
+- Juxtaposition is sequence: =a b c= matches =a=, then =b=, then =c=.
+  There is no separator token, so a sequence is written with whitespace
+  between terms and whitespace is insignificant everywhere.
+- Both are n-ary in effect and strictly binary in the tree (the choice is
+  right-associative, the sequence left), matching the nanopass document's
+  =alt= / =seq= forms.
+
+There is no way to write an unordered choice, an intersection, or a
+longest-match rule.  PEG has exactly one choice operator and adding a
+second would change the parsing model, not the surface.
+
+** Repetition
+:PROPERTIES:
+:ID:       grammar-repetition
+:END:
+
+| form | meaning |
+|------+---------|
+| =e*= | zero or more |
+| =e+= | one or more |
+| =e?= | zero or one |
+| =e{n}= | exactly n |
+| =e{n,m}= | between n and m inclusive |
+| =e{n,}= | at least n |
+
+All six are greedy and possessive: a repetition consumes as many
+iterations as it can and never gives one back, so ~+~ is not "at least
+one with backtracking" but "the longest run the following context
+permits by refusing the last iteration only if the next term fails".
+
+*The bounded forms are this document's decision.*  ={n}= is the surface
+spelling of the existing exactly-n combinator and is required; ={n,m}=
+and ={n,}= are the obvious completion, and their lowering is a
+compiler-side unrolling plus a repetition (={n,}= is n copies then a
+star, ={n,m}= is n copies then =(m-n)= optional copies), so they add no
+power and no instruction.
+
+*Hazard, inherited from the current implementation's test grammars.*  No
+alternative inside a repetition body may be nullable, or the repetition
+never terminates.  =(""?)*= is an infinite loop, not a parse error.  A
+reader may detect the case where the body is syntactically nullable (the
+empty literal, a =*=, a =?=, a choice with a nullable alternative) and
+reject it at compile time; a general decision procedure is not required
+and not wanted.
+
+** Predicates
+:PROPERTIES:
+:ID:       grammar-predicates
+:END:
+
+| form | meaning |
+|------+---------|
+| =!e= | succeeds, consuming nothing, iff =e= fails |
+| =&e= | succeeds, consuming nothing, iff =e= succeeds |
+
+A predicate produces no value whatsoever, at any arrow richness: it
+consumes no input, so it contributes nothing to any enclosing value list
+(=docs/term.org= §3.3's ordering invariant allows the resulting gap).
+This is why =&e= cannot be used to "keep" a value.
+
+** Sets and ranges
+:PROPERTIES:
+:ID:       grammar-sets
+:END:
+
+#+begin_example
+[abc]          one byte, a, b or c
+[a-z]          one byte in the range
+[a-z0-9_]      union of ranges and singletons
+[^a-z]         negation: one byte NOT in the set
+[\t\r\n ]      escapes, as in a literal (§2.4)
+[\x00-\x1f]    ranges over escaped bytes
+[-+]           a leading or trailing "-" is a literal "-"
+[\]]           an escaped "]"
+#+end_example
+
+- A set matches exactly one byte.  A set that matches nothing
+  (=[^]= - a set with every byte) is the failure of a single-byte
+  consumption; a set that matches everything is =.=.
+- Ranges are inclusive and ordered: =[z-a]= is a lexical error, not an
+  empty set, because it is always a typo.
+- =^= negates only in first position; elsewhere it is a literal byte, so
+  =[a^]= is the two-byte set ={a, ^}=.
+- A set is a single-byte matcher, which the compiler may fuse with an
+  adjacent one (the existing simplification that merges alternatives of
+  single-byte matchers and rewrites =!set .= into a complement).  That is
+  an optimization, and it is invisible at this level.
+
+** The any byte, and the anchors
+:PROPERTIES:
+:ID:       grammar-any-anchors
+:END:
+
+=.= matches any one byte, including =0x0A=.  It is the single-byte
+matcher with the largest set, not a line terminator: nothing in this
+language treats a newline specially, and a line-oriented grammar says so
+by writing =[^\n]= itself.
+
+| spelling | zero-width assertion | the existing flag |
+|----------+----------------------+-------------------|
+| =^=  | begin of line | =BeginLine= |
+| =$=  | end of line | =EndLine= |
+| =\A= | begin of text | =BeginText= |
+| =\z= | end of text | =EndText= |
+| =\b= | word boundary | =WordBoundary= |
+| =\B= | not a word boundary | =NoWordBoundary= |
+
+*The spellings are this document's decision*, chosen because the existing
+implementation exposes exactly six zero-width flags and these six tokens
+map onto them one for one, with the familiar regex meanings.  They are
+introduced by a backslash so that none of them can be confused with an
+identifier or with the ={= that opens a repetition.  A zero-width
+assertion consumes nothing and produces no value, like a predicate, but
+unlike a predicate it does not take an operand.
+
+** Rule references
+:PROPERTIES:
+:ID:       grammar-references
+:END:
+
+A rule name in a body is a call to that rule: =expr <-- term ('+' term)*=
+calls =term=, which calls =num= and =expr=, and the recursion is what
+makes the grammar a grammar.  A reference may be to a rule defined later
+in the same block (forward references are legal), and to a rule in the
+same block only, subject to Q1 (§3.1).  A reference that resolves to
+nothing is a compile-time error naming the unresolved identifier — the
+current implementation's ="non-terminal not found"=, kept as a hard error
+because it is always a bug.
+
+* What became of the current operators
+:PROPERTIES:
+:ID:       grammar-mapping
+:END:
+
+The current combinator API is not the surface, but every grammar in the
+existing test corpus is written against it, so the mapping is worth
+stating once.  "No surface form" means the concept is unreachable from a
+=.peg= file today, which is a deliberate gap and not an oversight.
+
+| current combinator | new surface | note |
+|--------------------+-------------+------|
+| =pat_alt=, =pat_or= | =e1 / e2= | ordered choice, right-associative |
+| =pat_seq=, =pat_concat= | juxtaposition | |
+| =pat_star= | =e*= | |
+| =pat_plus= | =e+= | |
+| =pat_optional= | =e?= | |
+| =pat_repeat= | =e{n}= | |
+| =pat_not=, =pat_and= | =!e=, =&=e= | no value |
+| =pat_literal= | ="..."=, ='...'= | bytes |
+| =pat_set= | =[...]= | one byte |
+| =pat_any= | =.= | one byte; n bytes is =.{n}= |
+| =pat_emptyop= | =^ $ \A \z \b \B= | six flags, six spellings |
+| =pat_nonterm= | =qname= | an identifier reference |
+| =pat_grammar= | ={ ... }= | first rule is the entry (§3) |
+| =pat_cap= | *removed* | D5: ={{ }}= is gone, the arrows carry the value |
+| =pat_memo= | *no surface form* | Q5/Q6 open: whether =:name= is the flag |
+| =pat_check= | *no surface form* | checker validation has no syntax yet |
+| =pat_search= | *no surface form* | first-occurrence search has no syntax yet |
+| =pat_error= | *no surface form* | the error-with-recovery combinator |
+
+The last three are the surface's known holes.  They are recorded here
+rather than invented, because a plausible invention is worse than a
+stated gap: each of them needs a decision about whether it is an
+expression form, a rule decorator, or a directive, and none of those
+decisions is in PLAN.org.
+
+* A worked example: arithmetic
+:PROPERTIES:
+:ID:       grammar-example-arith
+:END:
+
+#+begin_example
+grammar Arith {
+  start <-- ws sum ws
+
+  ws    <   [ \t\r\n]*
+  digit <-  [0-9]
+
+  num   <-- digit+ :digits
+
+  op    <-- [-+*/]
+
+  sum   --> Prec <-- product (op product)* :ops
+  product <-- atom (('*' / '/') atom)* :ops2
+
+  atom  <-- num / '(' sum ')'
+}
+#+end_example
+
+Commentary, line by line:
+
+- =start <-- ws sum ws= — the entry rule is the first rule (§3).  It
+  produces a term because it is the parse result, and it is the only
+  place the leading and trailing trivia are consumed.
+- =ws < [ \t\r\n]*= — the *cheapest* arrow.  Whitespace is pure trivia:
+  nobody wants its text, so nothing is built, and a memo hit on this rule
+  allocates nothing at all (D2's fast path).  This is the arrow to reach
+  for whenever a rule exists for the parser's sake and not the reader's.
+- =digit <- [0-9]= — ~<-~ because the digits are text that =num= will
+  want as a string, and flat because a digit has no structure.
+- =num <-- digit+ :digits= — ~<-~ would have been enough if numbers were
+  only ever text, but they are leaves of the tree, so =num= gets a node
+  of its own.  =:digits= names the run so the bottom-up half can read it
+  (D6).
+- =op <-- [-+*/]= — one text node, either an operator or a syntax error
+  reported later by the half that folds it.  ~<-~ would do here; ~<--~ is
+  chosen so the operator has an identity in the tree rather than being a
+  bare string.
+- =sum --> Prec <-- product (op product)* :ops= — both halves (D4): it
+  receives a precedence level from above and produces a term.  It reads
+  =Prec= only from its own in-part and nothing from a right sibling, so
+  it is L-attributed (§4.2).  =:ops= names the operator/product tail for
+  the folding body.
+- =product <-- atom (('*' / '/') atom)* :ops2= — the same shape without
+  an inherited value: a precedence-climbing grammar that does not use
+  =-->= to hand one down writes one rule per level, as here.
+- =atom <-- num / '(' sum ')'= — ordered choice, structure only.  Note
+  the parentheses are literals in a ~<--~ body: they consume input and
+  contribute their text to the value list, so the printer shows them, and
+  a body that wants them gone writes ~<=~ for a separate =paren= rule
+  instead.
+
+* A worked example: JSON
+:PROPERTIES:
+:ID:       grammar-example-json
+:END:
+
+#+begin_example
+grammar Json {
+  start <-- ws value ws
+
+  ws     <   [ \t\r\n]*
+
+  value  <-- object / array / string / number / "true" / "false" / "null"
+
+  object <-- '{' ws (member (ws ',' ws member)*)? ws '}'
+  member <-- string ws ':' ws value
+  array  <-- '[' ws (value (ws ',' ws value)* )? ws ']'
+
+  string <-  '"' ( [^"\\] / '\\' . )* '"'
+  number <-  '-'? digit+ ('.' digit+)? ([eE] [-+]? digit+)?
+}
+#+end_example
+
+Commentary:
+
+- =ws= is ~<=~ again, and =start= trims trivia at both ends.  The three
+  rules that *do* appear in the tree all use ~<--~, so the result is a
+  tree whose leaves print as strings: =(value (object (member (string
+  "\"a\"") (value (number "1")))))=.
+- The keywords =("true" / "false" / "null")= are written as literals in a
+  ~<--~ body, so each contributes a text node and the value prints as
+  =(value "true")=.  There is no way to give a literal a name of its own;
+  a grammar that wants =(true)= writes a rule.
+- =string= and =number= are ~<-~: the text *is* the value, quotes and
+  escapes included, so the grammar does no unescaping and the tree keeps
+  exactly the bytes that were matched.  This is the case ~<-~ exists for.
+  A consumer that wants the unescaped string does it in the half-pass
+  body, where a transformation belongs.
+- =object= and =array= use =(...)?= rather than =*= so that an empty
+  object does not have to be spelled as a special case, and the inner
+  =(?)= is the same trick one level down.
+- ~':'~ and ~','~ are quoted with single quotes in the object and array
+  rules and with a double-quoted literal in =string=, to show that both
+  delimiters are the same thing (§2.4).
+
+* Open questions
+:PROPERTIES:
+:ID:       grammar-open
+:END:
+
+None of these is resolved by this document; each is stated with its two
+readings so that the answer changes a production rather than the shape of
+the language.
+
+- *Q1 — nested-grammar scoping* (§3.1).  Changes visibility and whether
+  =qname= is meaningful.  *Blocks the front-end.*
+- *Q2 — is the right-arrow family really symmetric?*  (§4.1).  Changes
+  whether =>= and =->= can appear where the parent pushes nothing, and
+  therefore how much the reader checks.
+- *Q3 — where do the half-pass bodies live?*  (§4.4).  Decides whether
+  this is a parser language or a transformation language.  The reader
+  must keep the block opaque until it is answered.  *Blocks the
+  front-end.*
+- *Q5 — does =:name= control memoization or only name a value?*
+  (§4.3).  Changes what the compiler does with a name and what
+  =docs/protocol.org='s =captures= can return.  *Blocks the front-end.*
+- *Q6 — the memoization default per arrow, and the syntax for tree
+  memoization.*  This language has no spelling for tree memoization at
+  all, and the paper's merged entries are the thing that makes a =Star=
+  reparse logarithmic.  A grammar author cannot ask for it today.
+- *Q4 — which upstream dialects carry ΛPEG4* is out of scope here except
+  for one consequence worth recording: PLAN.org §5.4 makes the arrow's
+  dash count determine the *result type of the generated function* (=
+  <= nothing, =<-= a string, =<--= a term).  That is what makes the arrows
+  worth having rather than decorative, and it is why a reader must record
+  the arrow on every rule even when it also has a half-body.  How those
+  types are spelled in the dialects is Q4 and is Track C's business.

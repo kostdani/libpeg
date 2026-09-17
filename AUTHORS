@@ -1,0 +1,16 @@
+libpeg authors and contributors
+
+The parsing algorithm and the data structures are from "Fast Incremental
+PEG Parsing" by Zachary Yedidia and Stephen Chong (SLE 2021):
+
+    Zachary Yedidia
+    Stephen Chong
+
+This C implementation is derived from the authors' Go implementation of
+that paper, github.com/zyedidia/gpeg (MIT License, Copyright (c) 2020
+Zachary Yedidia), whose AVL tree code in turn derives from an MIT-licensed
+AVL implementation.  
+
+    Danila Kost
+
+
