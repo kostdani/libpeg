@@ -19,17 +19,10 @@
                       #:recursive? #t
                       #:select?
                       (lambda (file stat)
-                        ;; Skip build trees, VCS metadata and editor
-                        ;; droppings: what goes into the store is the
-                        ;; source.  Guix hands this predicate absolute
-                        ;; paths; the prefix tests cover relative ones.
+                        ;; Skip build directories and their artifacts.
                         (not (any (lambda (dir)
-                                    (or (string-prefix? dir file)
-                                        (string-suffix?
-                                         (string-append "/" dir) file)))
-                                  '("build" "build-asan" "build-term"
-                                    "build-werror" "cmake-build-debug"
-                                    ".git" ".idea"))))))
+                                    (string-prefix? dir file))
+                                  '("build" "build-asan"))))))
   (build-system cmake-build-system)
   (arguments
    (list #:tests? #t))
@@ -40,7 +33,6 @@
 A grammar compiles to a program for an LPeg-style parsing machine with a
 memoization table backed by a lazily-shifted interval tree, so that after
 a full parse, reparsing an edited input costs time proportional to the
-edit rather than the input.  A header-only C++ wrapper over the same ABI
-is installed alongside the C headers.")
+edit rather than the input.")
   (home-page #f)
   (license license:expat))

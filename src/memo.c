@@ -1,12 +1,12 @@
 /*
  * memo.c - memoization table for incremental packrat parsing.
- * See peg_memo.h for the public contract.
+ * See memo.h for the public contract.
  */
-#include "peg/peg_memo.h"
+#include "peg/memo.h"
 
 #include <stdlib.h>
 
-#include "peg/peg_util.h"
+#include "util.h"
 
 /* ---------------------------------------------------------------------- */
 /* Capture                                                                */
@@ -29,7 +29,7 @@ struct memo_capture {
 	int length;
 	struct memo_entry *ment;	/* weak reference */
 
-	uint32_t refs;		/* reference count (see peg_memo.h) */
+	uint32_t refs;		/* reference count (see memo.h) */
 
 	memo_capture **children;
 	size_t nchild;
@@ -216,8 +216,8 @@ static void capture_set_ment(memo_capture *c, memo_entry *e);
 
 /*
  * Attach an entry's captures to it, converting their absolute offsets
- * into entry-relative ones.  Idempotent per capture:
- * capture_set_ment returns early if the capture already belongs to an
+ * into entry-relative ones.  Idempotent per
+ * capture: setMEnt returns early if the capture already belongs to an
  * entry, which also keeps shared capture subtrees from double-shifting.
  */
 static void entry_set_pos(memo_entry *e)

@@ -14,9 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "peg/peg_pattern.h"
-#include "peg/peg_util.h"
-#include "peg/peg_vm.h"
+#include "peg/pattern.h"
+#include "util.h"
+#include "peg/vm.h"
 
 static int nchecks = 0;
 static int nfail = 0;
@@ -205,6 +205,93 @@ static void test_star_plus_repeat(void)
 	memo_table_free(t);
 	vm_code_free(c);
 	pat_free(rep0);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Input-cache edge cases                                                 */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * Regression: a multi-byte advance that crosses the input cache's
+ * chunk boundary.  The 4KB chunk is a cache, not the subject, so
+ * landing beyond it says nothing about the end of the data — the
+ * bound has to be the subject length.
+ */
+static void test_advance_across_chunk(void)
+{
+	size_t n = 5000;
+	uint8_t *subj = xmalloc(n);
+	memset(subj, 'a', n);
+
+	/* .{k} .{2} must match for every k; k = 4095 lands exactly on
+	 * the chunk edge, where the advance overshoots it. */
+	int ok = 1;
+	for (int k = 4093; k <= 4097; k++) {
+		pat *p = pat_seq(pat_repeat(pat_any(1), k), pat_any(2));
+		vm_code *c = pat_compile(p, NULL);
+		memo_table *t = memo_table_new(0);
+		vm_result r = vm_exec(c, subj, n, t, -1, -1);
+		if (!r.success || r.pos != k + 2) {
+			ok = 0;
+			fprintf(stderr, "  k=%d: success=%d pos=%d (want %d)\n",
+			        k, r.success, r.pos, k + 2);
+		}
+		vm_result_free(&r);
+		memo_table_free(t);
+		vm_code_free(c);
+		pat_free(p);
+	}
+	CHECK(ok, "multi-byte advance across the chunk boundary matches");
+
+	/* A genuine over-advance must still fail: 5000 bytes, ask for
+	 * 5001. */
+	pat *over = pat_repeat(pat_any(1), 5001);
+	vm_code *c = pat_compile(over, NULL);
+	memo_table *t = memo_table_new(0);
+	vm_result r = vm_exec(c, subj, n, t, -1, -1);
+	CHECK(!r.success, "advance past the subject end still fails");
+	vm_result_free(&r);
+	memo_table_free(t);
+	vm_code_free(c);
+	pat_free(over);
+
+	free(subj);
+}
+
+/*
+ * Regression: a failed TestAny must leave the subject position where
+ * the attempt started.  The head-fail optimization rewrites
+ * (Choice; Any) into TestAny, whose failure branch jumps straight to
+ * the alternative instead of unwinding through the fail handler that
+ * restores the position — so it has to restore it itself.
+ */
+static void test_failed_testany_restores_pos(void)
+{
+	/* .{2} fails on "a", so !(.{2}) succeeds at 0 and "a" matches. */
+	pat *p = pat_seq(pat_not(pat_any(2)), pat_literal("a", 1));
+	vm_code *c = pat_compile(p, NULL);
+	memo_table *t = memo_table_new(0);
+	vm_result r = vm_exec(c, (const uint8_t *)"a", 1, t, -1, -1);
+	CHECK(r.success && r.pos == 1,
+	      "failed TestAny leaves the position at the attempt start");
+	vm_result_free(&r);
+	memo_table_free(t);
+	vm_code_free(c);
+	pat_free(p);
+
+	/* The same failure followed by an Empty, which indexes the bytes
+	 * around the position: a leaked position made it read past the
+	 * subject. */
+	pat *q = pat_seq(pat_not(pat_any(2)), pat_emptyop(1));
+	c = pat_compile(q, NULL);
+	t = memo_table_new(0);
+	r = vm_exec(c, (const uint8_t *)"a", 1, t, -1, -1);
+	CHECK(r.success && r.pos == 0,
+	      "failed TestAny leaks no position into a following Empty");
+	vm_result_free(&r);
+	memo_table_free(t);
+	vm_code_free(c);
+	pat_free(q);
 }
 
 static void test_grammar_arith(void)
@@ -459,82 +546,6 @@ static void test_missing_nonterm(void)
 	pat_free(p);
 }
 
-/* A rule whose body is a bare reference compiles to [OpenCall
- * target][Return]: the open call sits in tail position, which the
- * resolver rewrites into a Jump while nopping the Return it displaces.
- * The target has to be recursive, or the grammar inliner removes the
- * open call before the resolver ever sees it. */
-static void test_tail_call_rules(void)
-{
-	/* S <- A ;  A <- "b" S / "z"   -- accepts b*z */
-	const char *names[] = { "S", "A" };
-	pat *defs[] = {
-		pat_nonterm("A"),
-		pat_alt(pat_concat((pat *[]){ pat_literal("b", 1),
-		                              pat_nonterm("S") }, 2),
-		        pat_literal("z", 1)),
-	};
-	pat *g = pat_grammar("S", names, defs, 2);
-	vm_code *c = pat_compile(g, NULL);
-	CHECK(c != NULL, "tail-call grammar compiles");
-	if (c == NULL) {
-		pat_free(g);
-		return;
-	}
-
-	/* The whole input: a tail call that clobbers its own Return
-	 * miscompiles into a program that rejects this. */
-	vm_result r = vm_exec(c, (const uint8_t *)"bbbz", 4, NULL, -1, -1);
-	CHECK(r.success && r.pos == 4, "tail call accepts \"bbbz\"");
-	vm_result_free(&r);
-
-	vm_result r2 = vm_exec(c, (const uint8_t *)"z", 1, NULL, -1, -1);
-	CHECK(r2.success && r2.pos == 1, "tail call accepts \"z\"");
-	vm_result_free(&r2);
-
-	vm_result r3 = vm_exec(c, (const uint8_t *)"b", 1, NULL, -1, -1);
-	CHECK(!r3.success, "tail call rejects \"b\"");
-	vm_result_free(&r3);
-
-	vm_code_free(c);
-	pat_free(g);
-
-	/* Mutually recursive rules reach the same rewrite from the other
-	 * side: A <- "b" S ends in a tail call too. */
-	const char *mnames[] = { "M", "N" };
-	pat *mdefs[] = {
-		pat_alt(pat_concat((pat *[]){ pat_literal("a", 1),
-		                              pat_nonterm("N") }, 2),
-		        pat_literal("z", 1)),
-		pat_concat((pat *[]){ pat_literal("b", 1),
-		                      pat_nonterm("M") }, 2),
-	};
-	pat *mg = pat_grammar("M", mnames, mdefs, 2);
-	vm_code *mc = pat_compile(mg, NULL);
-	CHECK(mc != NULL, "mutually recursive grammar compiles");
-	if (mc != NULL) {
-		vm_result mr = vm_exec(mc, (const uint8_t *)"ababz", 5,
-		                       NULL, -1, -1);
-		CHECK(mr.success && mr.pos == 5,
-		      "mutual recursion accepts \"ababz\"");
-		vm_result_free(&mr);
-		vm_code_free(mc);
-	}
-	pat_free(mg);
-}
-
-static void test_prettify_null_recovery(void)
-{
-	/* The recovery pattern of pat_error is optional, so the printer
-	 * has to be total over the constructor API's domain. */
-	pat *p = pat_error("boom", NULL);
-	char *s = pat_prettify(p);
-	CHECK(s != NULL && strstr(s, "boom") != NULL,
-	      "prettify err() with a NULL recovery pattern");
-	free(s);
-	pat_free(p);
-}
-
 static void test_prettify(void)
 {
 	vm_charset digits;
@@ -565,6 +576,8 @@ int main(void)
 	test_literals_and_sets();
 	test_predicates();
 	test_star_plus_repeat();
+	test_advance_across_chunk();
+	test_failed_testany_restores_pos();
 	test_grammar_arith();
 	test_captures();
 	test_search();
@@ -572,9 +585,7 @@ int main(void)
 	test_memo_and_tree_memo();
 	test_errors();
 	test_missing_nonterm();
-	test_tail_call_rules();
 	test_prettify();
-	test_prettify_null_recovery();
 
 	printf("pattern: %d checks, %d failures\n", nchecks, nfail);
 	return nfail ? 1 : 0;

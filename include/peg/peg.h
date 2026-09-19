@@ -1,8 +1,8 @@
 /*
  * peg.h - the end-to-end incremental parser.
  *
- * The top-level API: ties together a compiled grammar (peg_pattern.h),
- * the parsing machine (peg_vm.h), and the memoization table (peg_memo.h) into
+ * The top-level API: ties together a compiled grammar (pattern.h),
+ * the parsing machine (vm.h), and the memoization table (memo.h) into
  * one object that owns a subject buffer and can reparse incrementally
  * after edits.
  *
@@ -19,22 +19,14 @@
  * Correctness of the incremental result (it must equal a full reparse
  * of the edited text) is the subject of test_peg.c's differential test.
  */
-#ifndef PEG_PEG_H
-#define PEG_PEG_H
+#ifndef PEG_H
+#define PEG_H
 
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "peg/peg_pattern.h"
-#include "peg/peg_vm.h"
-
-/*
- * C linkage for C++ callers (peg.hpp).  The definitions are compiled as
- * C, so without this every symbol here would be mangled on the way in.
- */
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "peg/pattern.h"
+#include "peg/vm.h"
 
 typedef struct peg peg;
 
@@ -61,7 +53,7 @@ vm_result peg_parse(peg *g, const uint8_t *data, size_t len);
  * surviving entries.
  */
 void peg_edit(peg *g, int start, int end, const uint8_t *text,
-               size_t textlen);
+              size_t textlen);
 
 /*
  * Incremental reparse of the (edited) subject, reusing memoized
@@ -82,8 +74,4 @@ vm_result peg_capture_interval(peg *g, int low, int high);
 const uint8_t *peg_subject(const peg *g);
 size_t peg_subject_len(const peg *g);
 
-#ifdef __cplusplus
-} /* extern "C" */
-#endif
-
-#endif /* PEG_PEG_H */
+#endif /* PEG_H */

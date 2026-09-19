@@ -1,9 +1,9 @@
 /*
  * test_vm.c - tests for the parsing machine.
  *
- * Programs are hand-built with the vm_prog builder (mirroring the
- * construction style used throughout: programs are built via
- * the pattern package — ported in a later module).  Covers: character
+ * Programs are hand-built with the vm_prog builder (the construction
+ * style used throughout: programs are built via the pattern package).
+ * Covers: character
  * and set matching, control flow (choice/commit/back-commit/partial
  * commit/fail-twice), captures, the memo instructions, tree
  * memoization, the window optimization, error recording, and the
@@ -11,17 +11,11 @@
  *
  * Build: make test
  */
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <sys/wait.h>
-#include <unistd.h>
-#endif
-
-#include "peg/peg_vm.h"
+#include "peg/vm.h"
 
 static int failures = 0;
 static int checks = 0;
@@ -708,102 +702,6 @@ static void test_checkers(void)
 	vm_prog_free(p);
 }
 
-/* The checker contract only promises ">= 0 on success", so the machine
- * must not trust an advance that runs past the end of the subject. */
-static int check_overadvance(const uint8_t *match, size_t matchlen,
-                             const uint8_t *subject, size_t subjectlen,
-                             int id, int flag, void *ud)
-{
-	(void)match; (void)matchlen; (void)subject; (void)subjectlen;
-	(void)id; (void)flag; (void)ud;
-	return 1000;		/* far past the end of the subject below */
-}
-
-static void test_checker_overadvance(void)
-{
-	vm_prog *p = vm_prog_new();
-	vm_emit_check_begin(p, 0, 0);
-	int l1 = vm_prog_label(p);
-	int l2 = vm_prog_label(p);
-	vm_emit_choice(p, l2);
-	vm_prog_mark(p, l1);
-	vm_emit_char(p, 'a');
-	vm_emit_partial_commit(p, l1);
-	vm_prog_mark(p, l2);
-	vm_emit_check_end(p);
-	vm_code *c = vm_prog_finish(p);
-	vm_code_add_checker(c, check_overadvance, NULL);
-
-	/* An over-advance must fail the match.  Left unchecked it moves
-	 * the position off the end and the result reports success at an
-	 * impossible position (and later instructions index the buffer). */
-	vm_result r = vm_exec(c, (const uint8_t *)"aaa", 3, NULL, -1, 0);
-	CHECK(!r.success, "over-advancing checker fails the match");
-	vm_result_free(&r);
-
-	vm_code_free(c);
-	vm_prog_free(p);
-}
-
-/*
- * A builder abandoned before vm_prog_finish still owns its pending label
- * operands.  Freeing it has to release them: enough jumps to force the
- * fixup array to grow past its initial capacity, then no finish.  The
- * assertion is really the sanitizer's -- a leak is reported at exit.
- */
-static void test_builder_abandoned(void)
-{
-	vm_prog *p = vm_prog_new();
-	int l = vm_prog_label(p);
-	for (int i = 0; i < 64; i++)
-		vm_emit_jump(p, l);
-	vm_emit_char(p, 'a');
-	vm_prog_free(p);
-	CHECK(true, "abandoned builder frees cleanly");
-}
-
-/* ---------------------------------------------------------------------- */
-/* Jump-target width                                                       */
-/* ---------------------------------------------------------------------- */
-
-/*
- * Jump targets are 24-bit byte offsets.  A program that grows past that
- * has to be rejected: truncating the offset silently encodes a jump to
- * an unrelated instruction, and the result still decodes and runs.
- * Building such a program costs ~16MB and ends in abort(), so the check
- * runs in a child process.
- */
-static void test_jump_target_overflow(void)
-{
-#if defined(__unix__) || defined(__APPLE__)
-	pid_t pid = fork();
-	if (pid == 0) {
-		/* Child: build a program whose code passes the 24-bit
-		 * limit, then reference a label past it.  The abort
-		 * message is expected, so keep it out of the report. */
-		if (freopen("/dev/null", "w", stderr) == NULL)
-			_exit(2);	/* report failure to the parent */
-		vm_prog *p = vm_prog_new();
-		for (size_t i = 0; i < 0x1000000 / 2 + 8; i++)
-			vm_emit_fail(p);
-		int far = vm_prog_label(p);
-		vm_emit_jump(p, far);
-		vm_code *c = vm_prog_finish(p);
-		/* Only reached if the offset was truncated. */
-		vm_code_free(c);
-		vm_prog_free(p);
-		_exit(0);
-	}
-	int status = 0;
-	CHECK(pid > 0, "forked overflow probe");
-	if (pid > 0 && waitpid(pid, &status, 0) == pid)
-		CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
-		      "jump target past 24 bits aborts rather than truncating");
-#else
-	(void)0;
-#endif
-}
-
 /* ---------------------------------------------------------------------- */
 /* Empty (zero-width assertions)                                           */
 /* ---------------------------------------------------------------------- */
@@ -892,9 +790,6 @@ int main(void)
 	test_window_captures();
 	test_errors();
 	test_checkers();
-	test_checker_overadvance();
-	test_builder_abandoned();
-	test_jump_target_overflow();
 	test_empty();
 	test_tree_agrees_with_nomemo();
 

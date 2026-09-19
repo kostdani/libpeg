@@ -1,7 +1,7 @@
 /*
  * interval_tree.c - interval tree with lazy shifting, backed by an AVL tree.
  *
- * See peg_interval.h for the public contract and the design
+ * See interval_tree.h for the public contract and the design
  * rationale; the comments below focus on the internals.
  *
  * Structure
@@ -30,13 +30,13 @@
  * under-estimate.  Over-estimation is harmless: it only weakens subtree
  * pruning, never correctness.
  */
-#include "peg/peg_interval.h"
+#include "peg/interval_tree.h"
 
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "peg/peg_util.h"
+#include "util.h"
 
 /* Tree key: orders nodes by position, then by id. */
 typedef struct {

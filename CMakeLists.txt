@@ -3,15 +3,10 @@ cmake_minimum_required(VERSION 3.16)
 project(libpeg
     VERSION 0.1.0
     DESCRIPTION "Fast incremental PEG parsing"
-    LANGUAGES C CXX)
+    LANGUAGES C)
 
-# The library is C11 with no dependencies.  C++ enters only at the two
-# edges: the header-only wrapper (include/peg/peg.hpp), and the test
-# that holds it to its promises.  C++17 is the floor for string_view.
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Default to Release so an unconfigured build gets optimization (the
 # benchmarks are meaningless at -O0).
@@ -24,40 +19,39 @@ option(PEG_BUILD_BENCH "Build the benchmark harness" OFF)
 option(PEG_WERROR "Treat compiler warnings as errors" OFF)
 option(PEG_SANITIZE "Build with address and undefined-behavior sanitizers" OFF)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-include(PegCompileOptions)
+include(GNUInstallDirs)
 
 # ------------------------------------------------------------------
 # Library
 # ------------------------------------------------------------------
 
-# The modules are directories, not separate targets: one static library
-# keeps the link line (and the sanitizer flags, which must reach it)
-# in one place, and gives the embedded ports a single archive to link.
-# Public headers live under include/peg/.
-#
-# src/term/ also carries its own CMakeLists.txt, but only as a standalone
-# entry point for developing that module in isolation (cmake -S src/term).
-# The main build compiles its sources here, into this one archive, rather
-# than pulling in a second library to link and install.
+# include/peg/ holds the public headers and is the only thing installed;
+# src/ holds the implementation together with the internal headers
+# (util.h, vm_internal.h), which no consumer sees.
 add_library(peg STATIC
-    src/alloc/util.c
-    src/interval/interval_tree.c
-    src/memo/memo.c
-    src/vm/vm_code.c
-    src/vm/vm.c
-    src/pattern/pattern.c
-    src/term/node.c
-    src/term/sexpr.c
+    src/util.c
+    src/interval_tree.c
+    src/memo.c
+    src/vm_code.c
+    src/vm.c
+    src/pattern.c
     src/peg.c)
-add_library(peg::peg ALIAS peg)
+add_library(libpeg::peg ALIAS peg)
 
 target_include_directories(peg
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>)
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-peg_set_compile_options(peg)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(peg PRIVATE -Wall -Wextra)
+endif()
+
+if(PEG_WERROR)
+    target_compile_options(peg PRIVATE -Werror)
+endif()
 
 if(PEG_SANITIZE)
     # PUBLIC: the flags must reach the link line of every executable
@@ -71,7 +65,7 @@ set_target_properties(peg PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
 
 # ------------------------------------------------------------------
-# Tests
+# Test data
 # ------------------------------------------------------------------
 
 # The large inputs for the end-to-end tests and benchmarks live in a
@@ -80,17 +74,19 @@ set_target_properties(peg PROPERTIES
 # directory is absent.  A cache entry (rather than a plain variable) so
 # that -DPEG_TESTDATA_DIR=... can point at a checkout that keeps the
 # data elsewhere.
-set(PEG_TESTDATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../testdata/"
+set(PEG_TESTDATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/testdata/"
     CACHE PATH "Directory holding the large test/benchmark inputs")
 
-# The tests concatenate this with a bare filename, so the trailing
-# separator is load-bearing; -DPEG_TESTDATA_DIR=... rarely carries one,
-# and a missing slash silently turns "test.json" into a sibling of the
-# directory rather than a file inside it.  Normalise once, here.
-set(PEG_TESTDATA_DIR_DEF "${PEG_TESTDATA_DIR}")
-if(NOT PEG_TESTDATA_DIR_DEF MATCHES "/$")
-    string(APPEND PEG_TESTDATA_DIR_DEF "/")
-endif()
+# CMake normalizes PATH cache entries and strips any trailing slash, but
+# the tests reach their inputs by literal concatenation
+# (PEG_TESTDATA_DIR "test.json"), so the macro must end in a separator.
+# Re-add it here rather than depending on how -D was spelled.
+string(REGEX REPLACE "/+$" "" PEG_TESTDATA_DIR "${PEG_TESTDATA_DIR}")
+set(PEG_TESTDATA_DIR "${PEG_TESTDATA_DIR}/")
+
+# ------------------------------------------------------------------
+# Tests
+# ------------------------------------------------------------------
 
 if(PEG_BUILD_TESTS)
     enable_testing()
@@ -99,39 +95,30 @@ if(PEG_BUILD_TESTS)
         test_interval_tree
         test_memo
         test_vm
-        test_pattern
-        test_term)
+        test_pattern)
 
     foreach(test IN LISTS PEG_UNIT_TESTS)
-        add_executable(${test} tests/unit/${test}.c)
+        add_executable(${test} tests/${test}.c)
         target_link_libraries(${test} PRIVATE peg)
-        peg_set_compile_options(${test})
+        # In-tree tests may include the internal headers from src/.
+        target_include_directories(${test} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
         add_test(NAME ${test} COMMAND ${test})
     endforeach()
 
-    # test_interval_tree is the differential test: it cross-checks the
-    # interval tree against the naive array oracle.  The oracle is a
-    # test-only artifact — it is neither part of the library nor
-    # installed — so it is linked into that one executable.
-    target_sources(test_interval_tree PRIVATE tests/oracle/interval_array.c)
-    target_include_directories(test_interval_tree
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/oracle)
+    # test_interval_tree cross-checks the AVL tree against a naive array
+    # oracle.  The oracle exists only for that differential test, so it
+    # is compiled into the test rather than shipped in the library.
+    target_sources(test_interval_tree PRIVATE tests/interval_array.c)
 
     # The end-to-end test reads the real-world inputs.
-    add_executable(test_peg tests/unit/test_peg.c)
+    add_executable(test_peg tests/test_peg.c)
     target_link_libraries(test_peg PRIVATE peg)
+    target_include_directories(test_peg PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_definitions(test_peg PRIVATE
-        PEG_TESTDATA_DIR="${PEG_TESTDATA_DIR_DEF}")
+        PEG_TESTDATA_DIR="${PEG_TESTDATA_DIR}")
     add_test(NAME test_peg COMMAND test_peg)
-
-    # The C++ wrapper test: a C++17 translation unit that includes every
-    # public C header through peg.hpp and exercises the whole ABI
-    # through the RAII handles.  It links the same archive the C tests
-    # do -- the wrapper is header-only, so there is no second library.
-    add_executable(test_peg_cpp tests/unit/test_peg_cpp.cpp)
-    target_link_libraries(test_peg_cpp PRIVATE peg)
-    peg_set_compile_options(test_peg_cpp)
-    add_test(NAME test_peg_cpp COMMAND test_peg_cpp)
 endif()
 
 # ------------------------------------------------------------------
@@ -139,62 +126,25 @@ endif()
 # ------------------------------------------------------------------
 
 if(PEG_BUILD_BENCH)
-    add_executable(bench_peg tools/lpegc/bench.c)
+    add_executable(bench_peg bench/bench_peg.c)
     target_link_libraries(bench_peg PRIVATE peg)
-    peg_set_compile_options(bench_peg)
+    target_include_directories(bench_peg PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_definitions(bench_peg PRIVATE
-        PEG_TESTDATA_DIR="${PEG_TESTDATA_DIR_DEF}")
+        PEG_TESTDATA_DIR="${PEG_TESTDATA_DIR}")
 endif()
 
 # ------------------------------------------------------------------
 # Install
 # ------------------------------------------------------------------
 
-include(GNUInstallDirs)
-include(CMakePackageConfigHelpers)
-
-set(PEG_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/libpeg")
-
-# EXPORT: what makes the installed library usable as find_package(libpeg)
-# with the target peg::peg.
+# Only the public API: the transitive closure of what peg.h includes.
 install(TARGETS peg
-    EXPORT libpegTargets
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES
     include/peg/peg.h
-    include/peg/peg_util.h
-    include/peg/peg_interval.h
-    include/peg/peg_memo.h
-    include/peg/peg_vm.h
-    include/peg/peg_pattern.h
-    include/peg/peg_term.h
-    include/peg/peg.hpp
+    include/peg/pattern.h
+    include/peg/vm.h
+    include/peg/memo.h
+    include/peg/interval_tree.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/peg)
-
-install(EXPORT libpegTargets
-    NAMESPACE peg::
-    FILE libpegTargets.cmake
-    DESTINATION ${PEG_INSTALL_CMAKEDIR})
-
-configure_package_config_file(
-    cmake/libpegConfig.cmake.in
-    "${CMAKE_CURRENT_BINARY_DIR}/libpegConfig.cmake"
-    INSTALL_DESTINATION ${PEG_INSTALL_CMAKEDIR})
-
-write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/libpegConfigVersion.cmake"
-    VERSION ${PROJECT_VERSION}
-    COMPATIBILITY SameMajorVersion)
-
-install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/libpegConfig.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/libpegConfigVersion.cmake"
-    DESTINATION ${PEG_INSTALL_CMAKEDIR})
-
-# The same information for consumers that do not use CMake at all.
-configure_file(cmake/libpeg.pc.in
-    "${CMAKE_CURRENT_BINARY_DIR}/libpeg.pc" @ONLY)
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libpeg.pc"
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)

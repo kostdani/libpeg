@@ -1,5 +1,5 @@
 /*
- * peg_interval.h - interval tree with lazy shifting.
+ * interval_tree.h - interval tree with lazy shifting.
  *
  * A key-value map from intervals to user values, implemented as an AVL tree
  * augmented with subtree-maximum information (a classic interval tree).  It
@@ -70,14 +70,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-/*
- * C linkage for C++ callers (peg.hpp).  The definitions are compiled as
- * C, so without this every symbol here would be mangled on the way in.
- */
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /* Opaque tree. */
 typedef struct itree itree;
@@ -172,9 +164,5 @@ void itree_apply_all_shifts(itree *t);
  * all invariants hold; otherwise prints diagnostics to stderr.
  */
 bool itree_verify(itree *t);
-
-#ifdef __cplusplus
-} /* extern "C" */
-#endif
 
 #endif /* PEG_INTERVAL_TREE_H */

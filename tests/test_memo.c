@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "peg/peg_memo.h"
+#include "peg/memo.h"
 
 static int failures = 0;
 static int checks = 0;

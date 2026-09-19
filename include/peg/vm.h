@@ -1,5 +1,5 @@
 /*
- * peg_vm.h - the libpeg parsing machine.
+ * vm.h - the libpeg parsing machine.
  *
  * A grammar is compiled (by the compiler module) into a program of
  * instructions for a small virtual machine, in the style of LPeg's
@@ -9,10 +9,9 @@
  * maintain the logarithmic skip structure described in "Fast Incremental
  * PEG Parsing" (Section 5.2).
  *
- * The parsing machine's public interface.  The instruction set, encoded byte
- * format (including the padding rule), and interpreter semantics are
- * is fixed so grammars compile to the
- * same bytecode.
+ * The parsing machine's public interface.  The instruction set, encoded
+ * byte format (including the padding rule), and interpreter semantics
+ * are fixed, so a given grammar always compiles to the same bytecode.
  *
  * The machine is a register machine with two registers and a stack:
  *
@@ -28,12 +27,10 @@
  * Checkers
  * --------
  * A checker is user-supplied validation applied to a matched span after
- * the fact (e.g. accept [0-9]+ only if the integer fits in 8 bits).  The
- * A grammar can attach arbitrary
- * BackReference (define/use of named spans).  This port provides the
- * validation logic in function-pointer form
- * (the compiler front-end that emits CheckBegin/CheckEnd is not ported
- * yet either, see README).
+ * the fact (e.g. accept [0-9]+ only if the integer fits in 8 bits).  A
+ * grammar attaches one to a sub-pattern with pat_check, which compiles
+ * to a CheckBegin/CheckEnd pair bracketing that sub-pattern; the
+ * interpreter then calls the function on the span that matched.
  */
 #ifndef PEG_VM_H
 #define PEG_VM_H
@@ -42,25 +39,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "peg/peg_memo.h"
-
-/*
- * C linkage for C++ callers (peg.hpp).  The definitions are compiled as
- * C, so without this every symbol here would be mangled on the way in.
- * The inline helpers below are unaffected -- an inline function has
- * internal linkage either way.
- */
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "peg/memo.h"
 
 /* ---------------------------------------------------------------------- */
 /* Opcodes                                                                */
 /* ---------------------------------------------------------------------- */
 
 /*
- * Opcodes and their encoded sizes are fixed
- * (byte-compatibility of the encoded program is a porting goal).
+ * Opcodes and their encoded sizes are fixed.
  *
  * Encoding: each instruction is one opcode byte, one padding byte if the
  * argument length is even (so 16-bit arguments land on an even offset —
@@ -111,8 +97,9 @@ enum vm_op {
 /* ---------------------------------------------------------------------- */
 
 /*
- * A set of bytes, as a 256-bit bitmap.  Has() is on the interpreter's
- * hottest path, so it lives here in the header for inlining.
+ * A set of bytes, as a 256-bit bitmap.  Has() is
+ * on the interpreter's hottest path, so it lives here in the header for
+ * inlining.
  */
 typedef struct {
 	uint64_t bits[4];
@@ -304,9 +291,9 @@ size_t vm_code_ninsn(const vm_code *c);
 /* ---------------------------------------------------------------------- */
 
 /*
- * The input wrapper: a 4KB-chunk cache over a flat byte buffer with a
- * furthest-read tracker, which is what memo entries record as their
- * examined extent.
+ * The input wrapper: a 4KB-chunk cache over a
+ * flat byte buffer with a furthest-read tracker, which is what memo
+ * entries record as their examined extent.
  */
 typedef struct vm_input vm_input;
 
@@ -382,9 +369,5 @@ vm_result vm_exec(const vm_code *code, const uint8_t *input, size_t inputlen,
 
 /* Free a result: the capture tree, error strings, and error array. */
 void vm_result_free(vm_result *r);
-
-#ifdef __cplusplus
-} /* extern "C" */
-#endif
 
 #endif /* PEG_VM_H */

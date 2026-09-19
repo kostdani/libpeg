@@ -2,11 +2,11 @@
  * vm.c - the libpeg parsing machine: input wrapper, value stack, and the
  * interpreter loop.
  *
- * Instruction semantics are documented in peg_vm.h; the encoding, in
+ * Instruction semantics are documented in vm.h; the encoding, in
  * vm_code.c.
  *
  * Capture ownership (captures are shared between the stack, the memo
- * table, and the result tree, and are reference counted — see peg_memo.h):
+ * table, and the result tree, and are reference counted — see memo.h):
  *
  *  - Every container holding a capture pointer holds one reference per
  *    pointer: a stack entry's capture list, a capture's children array,
@@ -30,7 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "peg/peg_util.h"
+#include "util.h"
 #include "vm_internal.h"
 
 /* ---------------------------------------------------------------------- */
@@ -117,18 +117,21 @@ static bool input_peek(vm_input *i, uint8_t *out)
 	return true;
 }
 
-/* Advance n bytes; false if that moves past the end of the data. */
+/*
+ * Advance n bytes; false if that moves past the end of the data.
+ *
+ * The bound is the subject length, not the cached chunk: a chunk is
+ * only INPUT_CHUNK bytes, so a multi-byte advance from near the chunk
+ * end lands beyond it while still inside the subject.  Comparing
+ * against the chunk would fail such an advance spuriously.
+ */
 static bool input_advance(vm_input *i, int n)
 {
-	if (i->nchunk == 0)
-		return false;
+	size_t pos = i->base + i->coff + (size_t)n;
 	i->coff += (size_t)n;
-	if (i->coff >= i->nchunk) {
-		bool over = i->coff > i->nchunk;
-		input_refill(i, i->base + i->coff);
-		return !over;
-	}
-	return true;
+	if (i->coff >= i->nchunk)
+		input_refill(i, pos);
+	return pos <= i->len;
 }
 
 static void input_seek_to(vm_input *i, int pos)
@@ -655,7 +658,11 @@ loop:
 		}
 		case VM_EMPTY: {
 			int pos = vm_input_pos(src);
-			int r1 = pos > 0 ? input[pos - 1] : -1;
+			/* Both neighbours are bounds-checked: vm_exec may
+			 * be handed a subject buffer sized exactly to its
+			 * length, so reading at pos-1 is not free. */
+			int r1 = (pos > 0 && (size_t)(pos - 1) < inputlen)
+				? input[pos - 1] : -1;
 			int r2 = (size_t)pos < inputlen ? input[pos] : -1;
 			if ((empty_op_context(r1, r2) & in->a) != 0)
 				ip++;
@@ -713,6 +720,15 @@ loop:
 				push_btrack(&st, in->a, off);
 				ip++;
 			} else {
+				/* Unlike TestChar/TestSet, the failed
+				 * attempt already moved the input (that is
+				 * how it discovered the end), and this
+				 * branch bypasses the fail handler that
+				 * would restore it.  Put the position back
+				 * before taking the alternative, or the
+				 * grammar sees the subject advanced and a
+				 * later Empty reads past the subject. */
+				input_seek_to(src, off);
 				ip = (size_t)in->a;
 			}
 			break;
@@ -897,8 +913,7 @@ loop:
 
 				for (int i = 0; i < seen - 1; i++) {
 					stack_entry ent;
-					if (!stack_pop(&st, true, &ent))
-						abort_msg("MemoTree merge underflow");
+					stack_pop(&st, true, &ent);
 					entry_clear_capt(&ent);
 					free(ent.capt);
 				}
@@ -979,13 +994,10 @@ loop:
 			free(ent.capt);
 			if (n < 0)
 				goto fail;
-			/* input_advance() reports an over-advance by returning
-			 * false, but it has already moved the chunk past the
-			 * end by then, and later instructions (Empty reads
-			 * input[pos - 1] and input[pos]) index the raw buffer
-			 * unchecked.  A checker is external code, so its
-			 * return value is not trusted: reject the match here,
-			 * before any state moves. */
+			/* A checker is external code, so its return value
+			 * is not trusted: reject an over-advance here,
+			 * before any state moves.  (This also keeps the
+			 * unsigned addition below from wrapping.) */
 			if ((size_t)vm_input_pos(src) + (size_t)n > inputlen)
 				goto fail;
 			input_advance(src, n);

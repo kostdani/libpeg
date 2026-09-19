@@ -1,0 +1,256 @@
+#+TITLE: libpeg — TODO
+#+STARTUP: overview
+
+Open items left over from the 2026-09-19 review pass. For everything
+below, the library builds clean and all five tests pass (see README.md).
+The first two items are latent or diagnostic — neither is a live bug —
+item 3 is a packaging inefficiency, and the last two are missing
+features. Each entry records what was actually verified, so that a
+future reader can tell evidence from suspicion.
+
+* Diagnostics
+
+** TODO Give =abort_msg= a =noreturn= attribute
+   :PROPERTIES:
+   :LOCATION: src/util.h:27
+   :END:
+
+   =abort_msg= prints and calls =abort()=, but its declaration does not
+   say so, and the compiler cannot see through to the definition from
+   other translation units. It therefore cannot prove that the branches
+   calling it do not fall through, and reports =ent= fields as possibly
+   uninitialized all over the VM.
+
+   *Measured.* A default build emits exactly 26 warnings, all of them
+   =[-Wmaybe-uninitialized]=, all of this shape.
+
+   *Fix.* Mark the declaration:
+
+   #+begin_src c
+   #if defined(__GNUC__)
+   __attribute__((noreturn))
+   #endif
+   void abort_msg(const char *msg);
+   #+end_src
+
+   *Measured after the fix:* 26 warnings drop to 2. So the attribute is
+   worth it, but it is not the whole story — see the next item for the
+   last two.
+
+** TODO Initialize =ent= at the MemoTree merge, or check the pop
+   :PROPERTIES:
+   :LOCATION: src/vm.c:915-918
+   :END:
+
+   The last two warnings surviving the item above:
+
+   #+begin_src
+   vm.c:257:30: warning: 'ent.ncapt' may be used uninitialized
+   vm.c:918:41: warning: 'ent.capt' may be used uninitialized
+   #+end_src
+
+   #+begin_src c
+   for (int i = 0; i < seen - 1; i++) {
+           stack_entry ent;                     /* <- uninitialized */
+           stack_pop(&st, true, &ent);          /* <- return ignored */
+           entry_clear_capt(&ent);              /* reads ent.ncapt */
+           free(ent.capt);
+   }
+   #+end_src
+
+   *Analysis.* =stack_pop= (src/vm.c:327) returns false only when the
+   stack is empty, and on success it assigns =*out= wholesale. The loop
+   cannot empty the stack: the guard above it established =st.n >
+   seen + 1=, and the loop pops at most =seen - 1= times. So the code is
+   correct and the warning is a false positive — but it is a false
+   positive that a reader has to re-derive every time, and the unchecked
+   return is what invites it.
+
+   *Fix, either way:* write =stack_entry ent = {0};=, or make the pop
+   explicit:
+
+   #+begin_src c
+   if (!stack_pop(&st, true, &ent))
+           abort_msg("MemoTree merge: stack underflow");
+   #+end_src
+
+   The second is preferable: it turns the reasoning above into an
+   invariant that the machine checks, and it silences the warning for
+   the same reason =abort_msg= being =noreturn= silences the others.
+
+* Correctness — investigate, no reproduction yet
+
+** TODO Reconcile =memo_capture_absolutize= with the post-shift contract
+   :PROPERTIES:
+   :LOCATION: src/memo.c:365 and include/peg/memo.h:151
+   :END:
+
+   =memo_table_apply_edit= ends with:
+
+   #+begin_src c
+   itree_remove_and_shift_cb(t->tree, low, high, amt, table_free_entry,
+                             NULL);
+   #+end_src
+
+   and that function (src/interval_tree.c:626) does two things in this
+   order: it removes the overlapping intervals, invoking =on_evict= —
+   here =table_free_entry= — on each, and only /then/ calls
+   =iv_record_shift= to record the offset that surviving entries will
+   absorb lazily.
+
+   The documented contract of the function those evictions call into is
+   the opposite order:
+
+   #+begin_quote
+   Forget the owning memo entry of this capture and every descendant
+   attached to the same entry, converting their offsets back to absolute
+   positions using the entry's current (*post-shift*) start.
+   #+end_quote
+
+   So a capture that outlives its entry is frozen at a pre-shift start.
+
+   *Why this is not yet a bug report.* A differential stress run over
+   the tree and memo layer (5 seeds, ~22M checks, against a naive array
+   oracle) did not reproduce a wrong result, and =-fanalyzer= found
+   nothing here. It may well be that the two orders coincide for the
+   captures that can actually reach this path — but the prose and the
+   code currently disagree, and one of them is wrong.
+
+   *Next step.* Either find the argument that evicted entries can never
+   have live captures (and write it into the comment), or reproduce the
+   divergence with a test that keeps a result tree alive across an edit
+   that evicts its entry, then fix whichever of the two is wrong.
+
+** TODO Assert the head instruction really is index 0, or drop =l.insns[li]=
+   :PROPERTIES:
+   :LOCATION: src/pattern.c:900-907
+   :END:
+
+   In the disjoint head-fail branch of =PAT_ALT=, the test instruction
+   is built from the head matcher at index =li=:
+
+   #+begin_src c
+   size_t li = next_insn_idx(&l, 0);
+   ...
+   test = insn_test_char(VM_TEST_CHAR_NOCHOICE, (uint8_t)l.insns[li].a, l1);
+   #+end_src
+
+   but the branch drops index 0, unconditionally:
+
+   #+begin_src c
+   pir_app(&code, test);
+   for (size_t i = 1; i < l.n; i++)
+           pir_app(&code, l.insns[i]);
+   #+end_src
+
+   =next_insn_idx= skips labels and nops, so =li == 0= holds only while
+   the left branch's compiled code happens never to open with one. The
+   comment asserts exactly that ("element 0 is dropped whatever it is"),
+   but nothing enforces it. If a future change makes =compile_pat= emit
+   a leading label or nop for a left branch, this silently both drops a
+   live instruction and duplicates the head matcher — the same class of
+   mistake as the =insns[i + 1 + ri]= bug already fixed in this file
+   (see the comment at src/pattern.c:836-841).
+
+   *Measured.* Instrumented the branch to report =li != 0= and ran
+   =test_pattern=, =test_vm= and =test_peg= (which between them cover
+   arithmetic, JSON, Java, and the PEG language parsing itself): zero
+   hits. So it is latent today, not live.
+
+   *Fix.* Cheapest is to make the assumption checkable — assert =li == 0=
+   where it is relied on, so that whatever breaks it fails loudly instead
+   of miscompiling. Alternatively emit the instructions around the
+   dropped one, which removes the assumption entirely.
+
+* Packaging
+
+** TODO Repair the =#:select?= filter in guix.scm
+   :PROPERTIES:
+   :LOCATION: guix.scm:23-25
+   :END:
+
+   #+begin_src scheme
+   #:select?
+   (lambda (file stat)
+     ;; Skip build directories and their artifacts.
+     (not (any (lambda (dir)
+                 (string-prefix? dir file))
+               '("build" "build-asan"))))
+   #+end_src
+
+   The prefixes are relative; the paths are not. Instrumented the
+   predicate during a real =guix build -f guix.scm= and it receives
+   absolute paths — =/tmp/gt/CMakeLists.txt=, =/tmp/gt/src=, and so on.
+   =string-prefix? "build" "/home/.../build"= is false, and the whole
+   =not any= is therefore always true: the filter filters nothing.
+
+   *Currently harmless,* because no build directory exists in the source
+   tree (this is why it went unnoticed: the review builds out of tree).
+   The moment someone runs an in-tree =cmake -B build=, the entire build
+   directory — object files, static library, CMake caches — is copied
+   into the store as part of the source.
+
+   *Fix.* Match against the path relative to =%source-dir=, or match a
+   path segment:
+
+   #+begin_src scheme
+   (not (any (lambda (dir)
+               (string-contains file (string-append "/" dir "/")))
+             '("build" "build-asan")))
+   #+end_src
+
+   Worth adding a comment either way, since the intent is not obvious
+   from the call.
+
+* Missing features
+
+** TODO A front-end that reads =.peg= grammar files
+   :PROPERTIES:
+   :LOCATION: testdata/peg.peg
+   :END:
+
+   =testdata/peg.peg= describes the PEG language itself, and
+   =tests/test_peg.c= parses it — but the grammar is hand-built in C
+   (=peg_self_grammar=, around tests/test_peg.c:691) rather than read
+   from the file. The library can parse PEG source; what it cannot do is
+   accept a =.peg= file from a user. Every consumer that wants the
+   familiar syntax must currently rebuild that grammar by hand, and the
+   copy in the tests is the only reference for it.
+
+   Two things are missing, and they are separable:
+
+   1. a text front-end that turns the AST produced by =peg_self_grammar=
+      into a =pat= tree — this is the bulk of the work, and the test
+      already proves the parsing half;
+   2. grammar-directed capture wiring, so that a parsed rule body becomes
+      a definition and rule names become the non-terminals.
+
+   Note the grammar in =peg.peg= is a starting point, not a spec: check
+   it against the constructs =pattern.h= exposes (=pat_search=,
+   =pat_check=, =pat_memo=, the empty-op assertions) before treating it
+   as complete.
+
+** TODO Decide the project's home page
+   :PROPERTIES:
+   :LOCATION: guix.scm:37
+   :END:
+
+   =(home-page #f)=. Harmless for a local build, but a published package
+   wants a real URL — and =README.md= and =LICENSE= would then want to
+   agree with it.
+
+* Housekeeping
+
+** TODO Put the tree under version control
+   :PROPERTIES:
+   :LOCATION: —
+   :END:
+
+   The project is not in a repository. The rename and the directory
+   restructure were both done directly on the working tree and are
+   recoverable only from the backup at
+   =/tmp/libpeg-backup-20260919-031911=, which is not a durable
+   location. The large inputs in =testdata/= (11 MB, including
+   =bible.txt=) suggest deciding up front whether they are tracked or
+   fetched, since that choice is annoying to reverse once history
+   exists.

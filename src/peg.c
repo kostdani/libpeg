@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "peg/peg.h"
-#include "peg/peg_util.h"
+#include "util.h"
 
 struct peg {
 	vm_code *code;
@@ -63,7 +63,7 @@ vm_result peg_parse(peg *g, const uint8_t *data, size_t len)
 }
 
 void peg_edit(peg *g, int start, int end, const uint8_t *text,
-               size_t textlen)
+              size_t textlen)
 {
 	if (start < 0 || end < start || (size_t)end > g->len)
 		abort_msg("peg_edit: range out of bounds");

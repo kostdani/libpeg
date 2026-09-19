@@ -1,8 +1,8 @@
 /*
- * peg_memo.h - memoization table for incremental packrat parsing.
+ * memo.h - memoization table for incremental packrat parsing.
  *
  * Memoization table on top of the interval tree
- * (src/interval/interval_tree.c).
+ * (interval_tree.h).
  *
  * The table is the packrat parser's cache: it remembers, for a grammar
  * rule (identified by an integer id) applied at an input position, how
@@ -37,15 +37,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "peg/peg_interval.h"
-
-/*
- * C linkage for C++ callers (peg.hpp).  The definitions are compiled as
- * C, so without this every symbol here would be mangled on the way in.
- */
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "peg/interval_tree.h"
 
 struct memo_entry;
 struct memo_capture;
@@ -105,8 +97,7 @@ typedef struct {
  *    outlives its captures' use of it because the entry's own capture
  *    list holds strong references to the flat-list captures, and every
  *    capture attached to an entry is a descendant of a flat-list
- *    capture (attachment is by capture_set_ment recursion and capture
- *    structure
+ *    capture (attachment is by setMEnt recursion and capture structure
  *    is immutable once built).  When an entry is destroyed it walks its
  *    captures and re-absolutizes any still-living positions, so no
  *    dangling `ment` can survive.
@@ -280,9 +271,5 @@ void memo_table_apply_edit(memo_table *t, memo_edit edit);
  * The number of entries currently stored.
  */
 size_t memo_table_size(memo_table *t);
-
-#ifdef __cplusplus
-} /* extern "C" */
-#endif
 
 #endif /* PEG_MEMO_H */

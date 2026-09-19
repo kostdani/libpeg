@@ -1,0 +1,40 @@
+file    <- ws rule* ws
+
+rule    <- ident ws arrow ws body ws
+
+arrow   <- "<-" / "<"
+
+body    <- seq (ws "/" ws seq)*
+
+seq     <- term (ws term)*
+
+term    <- prefix (ws ("*" / "+" / "?"))*
+
+prefix  <- "!" ws prefix
+         / "&" ws prefix
+         / primary
+
+primary <- "(" ws body ws ")"
+         / "[" charset "]"
+         / literal
+         / "."
+         / qname
+
+charset <- "^"? charsetitem*
+
+charsetitem <- "\\" .
+             / [^\]\\] "-" [^\]\\]
+             / [^\]\\]
+
+literal <- "'" ( [^'\\] / "\\" . )* "'"
+         / '"' ( [^"\\] / "\\" . )* '"'
+
+qname   <- !ruleahead ident
+
+ruleahead <- ident ws arrow
+
+ident   <- [A-Za-z_] [A-Za-z0-9_]*
+
+ws      <- ( [ \t\r\n] / comment )*
+
+comment <- ";" [^\n]*

@@ -6,7 +6,7 @@
 
 #include <stdlib.h>
 
-#include "peg/peg_util.h"
+#include "util.h"
 
 struct iarray {
 	iarray_slot **slots;	/* array of pointers: handles stay stable */

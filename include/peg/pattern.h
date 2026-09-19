@@ -1,9 +1,9 @@
 /*
- * peg_pattern.h - patterns and the grammar compiler (PEG -> VM program).
+ * pattern.h - patterns and the grammar compiler (PEG -> VM program).
  *
  * A pattern is an AST node for a PEG expression.  Patterns are built with
  * the pat_* constructors, then compiled by pat_compile into a program for
- * the parsing machine (peg_vm.h).  The compilation pipeline has three stages:
+ * the parsing machine (vm.h).  The compilation pipeline has three stages:
  *
  *   1. compile: each node expands to a sequence of typed instructions
  *      with symbolic labels (an instruction-list IR);
@@ -47,15 +47,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "peg/peg_vm.h"
-
-/*
- * C linkage for C++ callers (peg.hpp).  The definitions are compiled as
- * C, so without this every symbol here would be mangled on the way in.
- */
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "peg/vm.h"
 
 typedef struct pat pat;
 
@@ -63,7 +55,7 @@ typedef struct pat pat;
 /* Constructors                                                           */
 /* ---------------------------------------------------------------------- */
 
-/* All constructors abort on allocation failure (see peg_util.h). */
+/* All constructors abort on allocation failure (see util.h). */
 
 /* Ordered choice p1 / p2 (right-assoc: prefers p1). */
 pat *pat_alt(pat *l, pat *r);
@@ -98,7 +90,7 @@ pat *pat_and(pat *p);
 pat *pat_cap(pat *p, int id);
 
 /* Checker validation: after p matches, run the checker over the matched
- * span (see peg_vm.h); it may consume additional bytes or fail the match. */
+ * span (see vm.h); it may consume additional bytes or fail the match. */
 pat *pat_check(pat *p, vm_checker_fn fn, void *ud);
 pat *pat_check_flags(pat *p, vm_checker_fn fn, void *ud, int id, int flag);
 
@@ -171,9 +163,5 @@ vm_code *pat_compile(pat *p, const char **err);
 /* A PEG-ish rendering of the pattern.  The returned
  * string is allocated; free it. */
 char *pat_prettify(pat *p);
-
-#ifdef __cplusplus
-} /* extern "C" */
-#endif
 
 #endif /* PEG_PATTERN_H */

@@ -2,7 +2,7 @@
  * interval_array.h - naive reference implementation of the interval map.
  *
  * A plain unsorted array of (id, interval, value) slots implementing the
- * same abstract interface as peg_interval.h.  Every operation is linear
+ * same abstract interface as interval_tree.h.  Every operation is linear
  * in the number of stored intervals, which makes this implementation far
  * too slow for the parser itself, but it is a deliberately simple oracle:
  * the randomized differential test cross-checks the AVL interval tree

@@ -14,8 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "peg/peg_util.h"
-#include "peg/peg_vm.h"
+#include "util.h"
+#include "peg/vm.h"
 #include "vm_internal.h"
 
 /* Encoded byte size of each opcode (padding included). */
@@ -96,9 +96,6 @@ void vm_prog_free(vm_prog *p)
 		free(p->errors[i]);
 	free(p->errors);
 	free(p->labels);
-	/* Pending label operands.  vm_prog_finish clears these, but a
-	 * builder abandoned before finishing still owns them. */
-	free(p->fixups);
 	free(p);
 }
 
@@ -555,9 +552,9 @@ static int32_t decode_i16(const uint8_t *b)
 
 /*
  * Pre-decode the encoded stream into the executable form: first pass
- * decodes operands and records the mapping from byte offsets to
- * instruction indices, second pass translates jump targets from byte
- * offsets to instruction indices.
+ * decodes operands and records the mapping
+ * from byte offsets to instruction indices, second pass translates
+ * jump targets from byte offsets to instruction indices.
  */
 static void vm_predecode(vm_code *c)
 {

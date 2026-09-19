@@ -1,12 +1,12 @@
 /*
  * vm_internal.h - types shared between the VM's translation units
  * (vm_code.c: builder/encoder/predecoder, vm.c: input/stack/interpreter).
- * Not part of the public interface; include peg_vm.h for that.
+ * Not part of the public interface; include vm.h for that.
  */
 #ifndef PEG_VM_INTERNAL_H
 #define PEG_VM_INTERNAL_H
 
-#include "peg/peg_vm.h"
+#include "peg/vm.h"
 
 /*
  * One pre-decoded instruction.  `a` is the primary operand: the jump

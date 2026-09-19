@@ -21,7 +21,7 @@
 #include <string.h>
 
 #include "interval_array.h"
-#include "peg/peg_interval.h"
+#include "peg/interval_tree.h"
 
 static int failures = 0;
 static int checks = 0;

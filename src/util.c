@@ -1,7 +1,7 @@
 /*
- * util.c - allocation helpers for the libpeg C library.
+ * util.c - allocation helpers for the peg C library.
  */
-#include "peg/peg_util.h"
+#include "util.h"
 
 #include <stdio.h>
 #include <stdlib.h>

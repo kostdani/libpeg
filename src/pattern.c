@@ -1,7 +1,7 @@
 /*
  * pattern.c - pattern AST, grammar compiler, and optimization passes.
  *
- * See peg_pattern.h for the pipeline overview.
+ * See pattern.h for the pipeline overview.
  *
  * The instruction-list IR (struct pir, below) is a growable array of
  * typed instruction slots in which labels are entries.  Optimize runs
@@ -13,8 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "peg/peg_pattern.h"
-#include "peg/peg_util.h"
+#include "peg/pattern.h"
+#include "util.h"
 
 /* ---------------------------------------------------------------------- */
 /* AST                                                                    */
@@ -766,8 +766,8 @@ static pir_insn insn_opencall(const char *name)
 
 static pir compile_pat(pctx *ctx, pat *p);
 
-/* Compile a grammar node: inline, emit the used definitions, resolve
- * open calls, tail-call optimize. */
+/* GrammarNode.Compile: inline, emit used definitions, resolve open
+ * calls, tail-call optimize. */
 static pir compile_grammar(pctx *ctx, pat *p)
 {
 	pir code = {0};
@@ -1211,7 +1211,7 @@ struct inline_data {
 };
 
 /* Substitute a small, leaf definition into a referencing non-terminal
- * (the `inlined` back-reference; see peg_pattern.h on ownership). */
+ * (the `inlined` back-reference; see pattern.h on ownership). */
 static void inline_fn(pat *sub, void *ud)
 {
 	struct inline_data *d = ud;
