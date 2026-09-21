@@ -16,7 +16,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <time.h>
+#endif
+
 
 #include "peg/peg.h"
 #include "util.h"
@@ -598,13 +603,20 @@ static pat *java_bench_grammar(void)
 	}, 2);
 }
 
+
 static double now_ms(void)
 {
+#ifdef _WIN32
+	LARGE_INTEGER freq, counter;
+	QueryPerformanceFrequency(&freq);
+	QueryPerformanceCounter(&counter);
+	return (double)counter.QuadPart * 1000.0 / (double)freq.QuadPart;
+#else
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+#endif
 }
-
 static void test_bench_java(void)
 {
 	FILE *f = fopen(PEG_TESTDATA_DIR "ScriptRuntime.java", "rb");
